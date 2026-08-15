@@ -176,7 +176,13 @@ class LdConsole:
 
     def modify(self, *, name: str | None = None, index: int | None = None,
                cpu: int | None = None, memory: int | None = None,
-               resolution: str | None = None, root: int | None = None) -> RunResult:
+               resolution: str | None = None, root: int | None = None,
+               manufacturer: str | None = None, model: str | None = None,
+               pnumber: str | None = None, imei: str | None = None,
+               imsi: str | None = None, simserial: str | None = None,
+               androidid: str | None = None, mac: str | None = None,
+               autorotate: int | None = None,
+               lockwindow: int | None = None) -> RunResult:
         args = ["modify"] + self._target(name, index)
         if cpu is not None:
             args += ["--cpu", str(cpu)]
@@ -186,6 +192,41 @@ class LdConsole:
             args += ["--resolution", resolution]
         if root is not None:
             args += ["--root", str(root)]
+        if manufacturer is not None:
+            args += ["--manufacturer", manufacturer]
+        if model is not None:
+            args += ["--model", model]
+        if pnumber is not None:
+            args += ["--pnumber", pnumber]
+        if imei is not None:
+            args += ["--imei", imei]
+        if imsi is not None:
+            args += ["--imsi", imsi]
+        if simserial is not None:
+            args += ["--simserial", simserial]
+        if androidid is not None:
+            args += ["--androidid", androidid]
+        if mac is not None:
+            args += ["--mac", mac]
+        if autorotate is not None:
+            args += ["--autorotate", str(autorotate)]
+        if lockwindow is not None:
+            args += ["--lockwindow", str(lockwindow)]
+        return self.run(args)
+
+    def global_setting(self, *, fps: int | None = None, audio: int | None = None,
+                       fastplay: int | None = None,
+                       cleanmode: int | None = None) -> RunResult:
+        """Apply emulator-wide settings (all instances)."""
+        args = ["globalsetting"]
+        if fps is not None:
+            args += ["--fps", str(fps)]
+        if audio is not None:
+            args += ["--audio", str(audio)]
+        if fastplay is not None:
+            args += ["--fastplay", str(fastplay)]
+        if cleanmode is not None:
+            args += ["--cleanmode", str(cleanmode)]
         return self.run(args)
 
     def remove(self, name: str | None = None, index: int | None = None) -> RunResult:

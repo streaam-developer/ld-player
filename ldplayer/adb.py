@@ -147,6 +147,25 @@ class Adb:
         return self._run(
             ["-s", self._serial(index, discover), "push", str(local), remote])
 
+    def install_multiple(self, index: int, apks: list[str | Path],
+                         discover: bool = True) -> None:
+        """Install split APKs together (base + config splits, same signature)."""
+        if len(apks) == 1:
+            self._run(["-s", self._serial(index, discover), "install", "-t",
+                       str(apks[0])])
+            return
+        cmd = [self.adb, "-s", self._serial(index, discover),
+               "install-multiple", "-t"] + [str(a) for a in apks]
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              timeout=self.timeout, check=False)
+        if proc.returncode != 0:
+            raise AdbError(
+                f"adb install-multiple failed ({proc.returncode}): "
+                f"{proc.stdout.strip() or proc.stderr.strip()}")
+        if "Success" not in proc.stdout:
+            raise AdbError(f"adb install-multiple did not report Success: "
+                           f"{proc.stdout.strip()}")
+
     def pull(self, index: int, remote: str, local: str | Path,
              discover: bool = False) -> str:
         return self._run(

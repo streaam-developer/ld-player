@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import re
+import shutil
+import subprocess
+import tempfile
 import time
+import zipfile
 
 from pathlib import Path
 
-from .adb import Adb
-from .config import load_config
+from .adb import Adb, AdbError
+from .config import find_ldconsole, load_config
 from .console import LdConsole, LdConsoleError, LdInstance
 
 
@@ -75,7 +79,8 @@ class Instance:
         return self._adb.port_for(self.index)
 
     # ------------------------------------------------------------- lifecycle
-    def launch(self, wait: bool = True, boot_wait: bool = True) -> "Instance":
+    def launch(self, wait: bool = True, boot_wait: bool = True,
+               boot_timeout: float | None = None) -> "Instance":
         cfg = load_config()
         self.resolve()
         if not self._console.is_running(index=self.index):
@@ -86,7 +91,7 @@ class Instance:
             self._console.wait_until_running(index=self.index,
                                              timeout=cfg["launch_timeout"])
         if boot_wait:
-            self.wait_for_boot(timeout=cfg["boot_timeout"])
+            self.wait_for_boot(timeout=boot_timeout or cfg["boot_timeout"])
         return self
 
     def quit(self, wait: bool = True) -> None:
@@ -116,13 +121,24 @@ class Instance:
 
     # ------------------------------------------------------------------ apps
     def install_apk(self, apk: str | Path) -> None:
+        """Install an APK, or extract+install an .apkm/.xapk/.apks bundle."""
         apk = Path(apk)
         if not apk.is_file():
             raise InstanceError(f"APK not found: {apk}")
-        res = self._console.install_apk(apk, index=self.index)
-        if not res.ok:
-            raise InstanceError(f"install failed: {res.text or res.stderr}")
-        print(f"[{self.name}] installed {apk.name}")
+
+        bundle = _prepare_bundle(apk)
+        try:
+            if len(bundle) == 1:
+                res = self._console.install_apk(bundle[0], index=self.index)
+                if not res.ok:
+                    raise InstanceError(
+                        f"install failed: {res.text or res.stderr}")
+            else:
+                self._adb.install_multiple(self.index, bundle)
+            print(f"[{self.name}] installed {apk.name} "
+                  f"({len(bundle)} part(s))")
+        finally:
+            _cleanup_bundle(apk, bundle)
 
     def install_apk_wait(self, apk: str | Path,
                          timeout: float = 180) -> str | None:
@@ -130,7 +146,11 @@ class Instance:
         apk = Path(apk)
         if not apk.is_file():
             raise InstanceError(f"APK not found: {apk}")
-        pkg = _guess_package(apk)
+        pkg = _package_name(apk)
+        if not pkg:
+            raise InstanceError(
+                f"could not determine package name for {apk.name}")
+        print(f"[{self.name}] installing {apk.name} (package {pkg}) ...")
         self.install_apk(apk)
         deadline = time.time() + timeout
         while time.time() < deadline:
@@ -163,12 +183,106 @@ class Instance:
 # module-level helpers
 # ---------------------------------------------------------------------------
 
+BUNDLE_SUFFIXES = {".apkm", ".xapk", ".apks"}
+TEMP_BUNDLE_DIRS: list[Path] = []
+
+
+def _aapt_path() -> Path | None:
+    console = find_ldconsole()
+    if console:
+        cand = console.parent / "aapt.exe"
+        if cand.is_file():
+            return cand
+    return None
+
+
+def _package_from_aapt(apk: Path) -> str | None:
+    aapt = _aapt_path()
+    if not aapt:
+        return None
+    try:
+        out = subprocess.run(
+            [str(aapt), "dump", "badging", str(apk)],
+            capture_output=True, text=True, timeout=60, check=False,
+        ).stdout
+    except Exception:
+        return None
+    m = re.search(r"package:\s*name='([^']+)'", out)
+    return m.group(1) if m else None
+
+
+def _package_from_info_json(bundle_dir: Path) -> str | None:
+    info = bundle_dir / "info.json"
+    if not info.is_file():
+        return None
+    import json
+    try:
+        data = json.loads(info.read_text(encoding="utf-8"))
+        return data.get("pname")
+    except Exception:
+        return None
+
+
 def _guess_package(apk: Path) -> str:
-    """Best-effort package name from the APK file name (no aapt required)."""
+    """Best-effort package name from the APK file name."""
     name = apk.stem
+    # take the leading reverse-domain part, drop the _version/_dpi suffix
+    m = re.match(r"^([a-zA-Z0-9]+(\.[a-zA-Z0-9]+)+)", name)
+    if m:
+        return m.group(1).lower()
     name = name.replace("_", ".").replace("-", ".").replace("+", ".")
     name = re.sub(r"[^a-zA-Z0-9.]", ".", name).strip(".")
     return name.lower()
+
+
+def _package_name(apk: Path) -> str | None:
+    """Best-effort package name for an apk / bundle (aapt > info.json > name)."""
+    if apk.suffix.lower() in BUNDLE_SUFFIXES:
+        extracted = _prepare_bundle(apk)
+        try:
+            pkg = _package_from_info_json(extracted[0].parent)
+            if pkg:
+                return pkg
+            for part in extracted:
+                pkg = _package_from_aapt(part)
+                if pkg:
+                    return pkg
+        finally:
+            _cleanup_bundle(apk, extracted)
+        return _guess_package(apk)
+    pkg = _package_from_aapt(apk)
+    return pkg or _guess_package(apk)
+
+
+def _prepare_bundle(apk: Path) -> list[Path]:
+    """Return installable apk part(s). Plain .apk -> [path]. Bundle -> extract."""
+    if apk.suffix.lower() not in BUNDLE_SUFFIXES:
+        return [apk]
+
+    dest = Path(tempfile.mkdtemp(prefix="ldcli_bundle_"))
+    TEMP_BUNDLE_DIRS.append(dest)
+    try:
+        with zipfile.ZipFile(apk) as z:
+            parts = [n for n in z.namelist() if n.lower().endswith(".apk")]
+            if not parts:
+                raise InstanceError(f"{apk.name} contains no .apk entries")
+            z.extractall(dest)
+    except zipfile.BadZipFile:
+        raise InstanceError(f"{apk.name} is not a valid bundle zip")
+
+    # order: base.apk first, then config splits
+    parts_paths = [dest / p for p in sorted(parts)]
+    parts_paths.sort(key=lambda p: (p.name != "base.apk", p.name))
+    return parts_paths
+
+
+def _cleanup_bundle(apk: Path, parts: list[Path]) -> None:
+    if apk.suffix.lower() not in BUNDLE_SUFFIXES:
+        return
+    for tmp in TEMP_BUNDLE_DIRS:
+        if tmp.exists():
+            shutil.rmtree(tmp, ignore_errors=True)
+    TEMP_BUNDLE_DIRS.clear()
 
 
 def list_instances(console: LdConsole) -> list[LdInstance]:

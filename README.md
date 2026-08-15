@@ -31,8 +31,12 @@ ldcli list
 :: open an instance (name or index) and wait for Android to boot
 ldcli launch --index 0
 
-:: install an APK
+:: install an APK (plain .apk, or a .apkm/.xapk/.apks bundle)
 ldcli install --index 0 C:\apps\myapp.apk --wait
+ldcli setup --index 0 --apk C:\apps\app.apkm          :: profile + boot + install, one-shot
+
+:: give an instance a unique phone identity (IMEI/SIM/MAC/model) + tune it
+ldcli configure --index 0 --vendor samsung
 
 :: THE FLAGSHIP: full-backup old -> install apk -> clone into NEW instance -> open it
 ldcli roll --old-name LDPlayer --new-name fresh --apk C:\apps\myapp.apk
@@ -57,6 +61,8 @@ ldcli roll --old-name LDPlayer --new-name fresh --apk C:\apps\myapp.apk
 | `quit [target]` | shut an instance down |
 | `add NAME [--source X] [--cpu-num N] [--memory MB] [--resolution WxH]` | create a new instance (blank, or cloned) |
 | `modify [target] [--cpu-num] [--memory] [--resolution]` | change resources |
+| `configure [target] [--vendor V] [--seed N] [--cpu-num] [--memory] [--resolution] [--root] [--no-fast] [--no-light] [--keep-audio]` | apply a **unique phone profile** (IMEI/IMSI/SIM/MAC/Android ID/number/model) + fast/light tuning |
+| `setup [target] --apk FILE [same options as configure] [--no-boot-wait] [--boot-timeout S] [--timeout S]` | one-shot: configure → launch → install → verify package |
 | `remove [target]` | delete an instance |
 | `rename [target] TITLE` | rename an instance |
 | `props [target]` | show resolved name / index / running / adb endpoint |
@@ -64,7 +70,7 @@ ldcli roll --old-name LDPlayer --new-name fresh --apk C:\apps\myapp.apk
 ### Apps
 | command | description |
 |---|---|
-| `install [target] APK [--wait]` | install an APK (`--wait` polls until the package registers) |
+| `install [target] APK [--wait]` | install an APK or a `.apkm`/`.xapk`/`.apks` bundle (`--wait` polls until the package registers) |
 | `uninstall [target] PACKAGE` | remove an app |
 | `run [target] PACKAGE` / `stop [target] PACKAGE` | start / force-stop an app |
 
@@ -133,6 +139,48 @@ One-command takeover with an old backup kept:
 ```bat
 ldcli roll --old-name LDPlayer --new-name worker1 --apk job.apk --quit-old
 ```
+
+## Unique phone profiles & performance tuning
+
+Every instance gets its own **distinct, realistic device identity**:
+
+```bat
+ldcli configure --index 0 --vendor samsung      :: fixed brand, random IMEI/IMSI/...
+ldcli configure --index 0 --seed 12345          :: reproducible profile (same values each run)
+ldcli configure --index 0 --no-light            :: keep the default resolution/rotation
+ldcli configure --index 0 --memory 1024         :: keep resolution, force 1 GB RAM
+```
+
+Each profile generates unique, checksum-valid **IMEI**, **IMSI**, **SIM ICCID**,
+**Android ID**, **MAC address**, phone number, and a **manufacturer/model** pair
+(chosen from samsung/google/xiaomi/oneplus/honor/oppo/vivo/nokia). Profiles are
+written to the instance's config via `ldconsole modify` — no rooting needed.
+
+By default `configure` also applies "fast & lightweight" settings (unlocked on
+the same command):
+
+- `modify --cpu 4 --memory 768` and a light `960,540,240` resolution;
+- `globalsetting --fps 30 --fastplay 1 --cleanmode 1 --audio 0` (global, applies
+  to every instance) — keep audio with `--keep-audio`, skip tuning with
+  `--no-fast`/`--no-light`.
+
+> Note: 768 MB is the absolute floor for Android on LDPlayer; if an instance
+> crash-loops, raise it with `--memory 1024`.
+
+## Installing APK bundles
+
+APKMirror-style `.apkm`, plus `.xapk`/`.apks`, are zip bundles containing a
+`base.apk` + split configs. `ldcli install` and `ldcli setup` detect these,
+extract them to a temp dir, and install all parts in one shot with
+`adb install-multiple`:
+
+```bat
+ldcli setup --index 0 --apk "com.facebook.katana_..._apkmirror.com.apkm"
+```
+
+The package name is read from the bundle's `info.json`, or from the APK with
+`aapt.exe dump badging` (ships with LDPlayer) when present; filename guessing is
+only a last resort.
 
 ## Notes
 

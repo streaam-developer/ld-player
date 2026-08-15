@@ -11,6 +11,8 @@ from __future__ import annotations
 import argparse
 import sys
 
+from pathlib import Path
+
 from ldplayer import __version__
 from ldplayer.config import (find_adb, find_ldconsole, load_config,
                              save_config, status, version_of)
@@ -21,6 +23,8 @@ from ldplayer.automation import Automator
 from ldplayer import backup as backup_mod
 from ldplayer import workflow as workflow_mod
 from ldplayer import repair as repair_mod
+from ldplayer import device as device_mod
+from ldplayer.device import DeviceProfile
 
 
 def _session(args) -> tuple[LdConsole, Adb, dict]:
@@ -323,6 +327,64 @@ def cmd_repair(args):
           "if drivers need reinstalling)")
 
 
+def _profile_args(args) -> dict:
+    resolution = None
+    if args.resolution:
+        r = args.resolution.replace("x", ",").replace("X", ",")
+        parts = r.split(",")
+        if len(parts) == 2:
+            parts.append("240")
+        resolution = ",".join(parts)
+    return {
+        "vendor": getattr(args, "vendor", None),
+        "seed": getattr(args, "seed", None),
+        "cpu": getattr(args, "cpu_num", None),
+        "memory": getattr(args, "memory", None),
+        "resolution": resolution,
+        "root": getattr(args, "root", False),
+        "fast": not getattr(args, "no_fast", False),
+        "light": not getattr(args, "no_light", False),
+        "audio_off": not getattr(args, "keep_audio", False),
+    }
+
+
+def cmd_configure(args):
+    console, adb, _ = _session(args)
+    name, index = _pick(args, console)
+    if name is None and index is None:
+        index = 0
+    profile = device_mod.apply_profile(console, name=name, index=index,
+                                       **_profile_args(args))
+    print(f"[{name or index}] applied unique phone profile:")
+    print(f"  {profile.summary()}")
+
+
+def cmd_setup(args):
+    """One-shot: unique phone profile + fast/light + launch + install APK."""
+    console, adb, _ = _session(args)
+    name, index = _pick(args, console)
+    if name is None and index is None:
+        index = 0
+    if not args.apk:
+        die("setup requires --apk <file>")
+
+    apk = Path(args.apk)
+    if not apk.is_file():
+        die(f"APK not found: {apk}")
+
+    profile = device_mod.apply_profile(console, name=name, index=index,
+                                       **_profile_args(args))
+    print(f"[{name or index}] phone profile: {profile.summary()}")
+
+    inst = Instance(console, adb, name=name, index=index)
+    inst.resolve()
+    inst.launch(boot_wait=not args.no_boot_wait,
+                boot_timeout=args.boot_timeout)
+
+    pkg = inst.install_apk_wait(apk, timeout=args.timeout)
+    print(f"[{name or index}] done: {pkg} installed, instance ready")
+
+
 # -------------------------------------------------------------------- parser
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
@@ -392,6 +454,49 @@ def build_parser() -> argparse.ArgumentParser:
     inst_args(s)
     s.add_argument("title")
     s.set_defaults(func=cmd_rename)
+
+    # phone profile / tuning
+    def profile_opts(sp, default_fast=True, default_light=True):
+        sp.add_argument("--vendor", choices=list(device_mod.VENDORS),
+                        help="phone vendor (default: random per instance)")
+        sp.add_argument("--seed", type=int,
+                        help="reproducible profile seed")
+        sp.add_argument("--cpu-num", type=int, choices=[1, 2, 3, 4],
+                        help="CPU cores (default 4)")
+        sp.add_argument("--memory", type=int, help="RAM in MB (default 768 "
+                        "in light mode, else 1024)")
+        sp.add_argument("--resolution",
+                        help="resolution W,H[,dpi] e.g. 1280,720,240 or 960x540")
+        sp.add_argument("--root", action="store_true", help="enable root")
+        if default_fast:
+            sp.add_argument("--no-fast", action="store_true",
+                            help="keep default fps/audio/fastplay")
+        if default_light:
+            sp.add_argument("--no-light", action="store_true",
+                            help="keep default resolution/rotation settings")
+        sp.add_argument("--keep-audio", action="store_true",
+                        help="do not mute emulator audio")
+
+    s = sub.add_parser("configure",
+                       help="set a unique phone profile per instance "
+                            "(imei/imsi/sim/mac/model) + performance tuning")
+    inst_args(s)
+    profile_opts(s)
+    s.set_defaults(func=cmd_configure)
+
+    s = sub.add_parser(
+        "setup",
+        help="one-shot: unique phone profile + fast/light + launch + install apk")
+    inst_args(s)
+    profile_opts(s)
+    s.add_argument("--apk", help="APK or .apkm/.xapk bundle to install")
+    s.add_argument("--no-boot-wait", action="store_true",
+                   help="install without waiting for full Android boot")
+    s.add_argument("--boot-timeout", type=int, default=600,
+                   help="seconds to wait for Android boot (default 600)")
+    s.add_argument("--timeout", type=int, default=180,
+                   help="seconds to wait for the package to register")
+    s.set_defaults(func=cmd_setup)
 
     # apps
     s = sub.add_parser("install", help="install an APK")
