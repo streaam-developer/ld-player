@@ -3,6 +3,11 @@ __pycache__/
 *.pyc
 *.pyo
 
+# APKs / installers
+*.apk
+*.apks
+*.xapk
+
 # Backups created by the tool
 backups/
 *.7z

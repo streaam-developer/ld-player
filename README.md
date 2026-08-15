@@ -52,6 +52,7 @@ ldcli roll --old-name LDPlayer --new-name fresh --apk C:\apps\myapp.apk
 | command | description |
 |---|---|
 | `list` | list all instances (index / status / name) |
+| `repair [--repair-tool] [--no-kill]` | fix PowerUpFailed / read-only vmdk / stuck processes |
 | `launch [--name X \| --index N \| -i Y] [--no-boot-wait]` | open an instance |
 | `quit [target]` | shut an instance down |
 | `add NAME [--source X] [--cpu-num N] [--memory MB] [--resolution WxH]` | create a new instance (blank, or cloned) |
@@ -140,3 +141,49 @@ ldcli roll --old-name LDPlayer --new-name worker1 --apk job.apk --quit-old
 - `ldconsole copy` reports a non-zero exit code on success in v9.5.31.0; the
   tool verifies instance creation by querying `list2` instead of trusting the
   exit code.
+
+## Troubleshooting
+
+### "Power-up of virtual machine failed (PowerUpFailed)"
+
+The most common cause is a **read-only vmdk** left behind by a clone:
+
+```
+Failed to open image '...\vms\leidian0\data.vmdk' for writing due to wrong permissions
+Power up failed (vrc=VERR_VD_IMAGE_READ_ONLY)
+```
+
+Fix it:
+
+```bat
+ldcli repair            :: kills stale emulator processes, clears read-only
+                          :: flags on every vmdk, restarts the adb server
+ldcli launch --index 0
+```
+
+`repair` is safe to run with instances stopped. If the VirtualBox drivers
+themselves need reinstalling, run `ldcli repair --repair-tool` (opens LDPlayer's
+built-in repairer) from an **elevated** prompt, or click **Fix** in LDPlayer's
+error dialog.
+
+`ldcli roll` avoids this entirely: it shuts the source instance down **before**
+cloning, so the disk is never locked mid-clone.
+
+### Emulator starts but reboots in a loop / gets killed
+
+This is a resource problem, not a config one:
+
+- LDPlayer 9 instances need ~1 GB RAM **each** and a hardware-virtualized CPU.
+- If the host has no VT-x/AMD-V (e.g. this machine is itself a VM), LDPlayer
+  falls back to software emulation (NEM) which is very slow and unstable.
+- Reduce memory pressure: quit other instances/apps, or lower the instance RAM
+  with `ldcli modify --index N --memory 1024`. Minimum sensible is 1024 MB;
+  anything lower than ~768 MB makes Android crash-loop.
+
+Check your host with:
+
+```bat
+ldcli props --index 0      :: shows running / booted state
+(Get-CimInstance Win32_Processor).VirtualizationFirmwareEnabled
+```
+

@@ -20,6 +20,7 @@ from ldplayer.instance import Instance, InstanceError, create_instance, list_ins
 from ldplayer.automation import Automator
 from ldplayer import backup as backup_mod
 from ldplayer import workflow as workflow_mod
+from ldplayer import repair as repair_mod
 
 
 def _session(args) -> tuple[LdConsole, Adb, dict]:
@@ -309,6 +310,19 @@ def cmd_props(args):
         print("adb endpoint: (instance stopped)")
 
 
+def cmd_repair(args):
+    """Fix PowerUpFailed / VERR_VD_IMAGE_READ_ONLY conditions."""
+    report = repair_mod.repair(verbose=True,
+                               run_repair_tool=args.repair_tool,
+                               kill=not args.no_kill)
+    for w in report["warnings"]:
+        print(f"  [!] {w}")
+    print(f"  killed {len(report['killed'])} stale process(es), "
+          f"cleared read-only on {len(report['fixed_vmdks'])} vmdk(s)")
+    print("next: 'ldcli launch --index 0' (run from an elevated prompt "
+          "if drivers need reinstalling)")
+
+
 # -------------------------------------------------------------------- parser
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
@@ -334,6 +348,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     # list
     sub.add_parser("list", help="list all instances").set_defaults(func=cmd_list)
+
+    s = sub.add_parser(
+        "repair",
+        help="fix PowerUpFailed / read-only vmdk / stuck processes")
+    s.add_argument("--repair-tool", action="store_true",
+                   help="also open LDPlayer's built-in repairer")
+    s.add_argument("--no-kill", action="store_true",
+                   help="do not kill running emulator processes")
+    s.set_defaults(func=cmd_repair)
 
     # lifecycle
     s = sub.add_parser("launch", help="launch (open) an instance")

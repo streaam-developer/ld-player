@@ -59,24 +59,30 @@ def roll(
 
     results: dict = {"old": old_name, "new": new_name}
 
-    # 1) full backup of the old instance
+    # 1) full backup of the old instance (safe while running)
     snapshot = full_export(console, old_name, backup_dir, tag or "pre-roll")
     results["snapshot"] = str(snapshot)
 
     old = Instance(console, adb, name=old_name)
     old.resolve()
 
-    # 2) ensure old instance is running
+    # 2) ensure old instance is running, then install the APK
     if not old.info.running and not console.is_running(index=old.index):
         if not launch_old:
             raise WorkflowError(
                 f"old instance '{old_name}' is not running and --no-launch-old set")
         print(f"launching old instance '{old_name}' ...")
         old.launch(boot_wait=boot_wait)
-
-    # 3) install the APK into the old instance
     if apk:
         old.install_apk_wait(apk)
+
+    # 3) shut the source down BEFORE cloning so its vmdk isn't locked
+    #    (cloning/launching a clone while the source runs triggers
+    #     VERR_VD_IMAGE_READ_ONLY / PowerUpFailed)
+    if console.is_running(index=old.index):
+        print(f"pausing source '{old_name}' so the clone can be created ...")
+        old.quit()
+        results["source_paused"] = True
 
     # 4) clone old into a brand new instance
     print(f"cloning '{old_name}' -> '{new_name}' ...")
@@ -90,15 +96,15 @@ def roll(
     new.launch(boot_wait=boot_wait)
     results["new_launched"] = True
 
-    # 6) decide fate of the old one
-    if quit_old:
-        print(f"quitting old instance '{old_name}' (snapshot kept)...")
-        old.quit()
-        results["old_running"] = False
-    else:
+    # 6) relaunch the old one (unless --quit-old), so it keeps being usable
+    if not quit_old:
+        print(f"restarting old instance '{old_name}' ...")
+        old.launch(boot_wait=boot_wait)
         results["old_running"] = True
-        print(f"[+] old instance '{old_name}' kept running "
-              f"(it was fully backed up to {snapshot.name})")
+    else:
+        results["old_running"] = False
+        print(f"[+] old instance '{old_name}' left stopped "
+              f"(its snapshot is at {snapshot.name})")
 
     print(f"[+] new instance '{new_name}' is up (adb port {new.adb_port})")
     return results
