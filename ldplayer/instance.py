@@ -237,11 +237,12 @@ def _package_from_aapt(apk: Path) -> str | None:
     try:
         out = subprocess.run(
             [str(aapt), "dump", "badging", str(apk)],
-            capture_output=True, text=True, timeout=60, check=False,
-        ).stdout
+            capture_output=True, timeout=60, check=False,
+        )
+        text = out.stdout.decode("utf-8", errors="replace")
     except Exception:
         return None
-    m = re.search(r"package:\s*name='([^']+)'", out)
+    m = re.search(r"package:\s*name='([^']+)'", text)
     return m.group(1) if m else None
 
 
