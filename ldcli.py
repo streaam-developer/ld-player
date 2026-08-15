@@ -220,6 +220,7 @@ def cmd_roll(args):
         tag=args.tag,
         quit_old=args.quit_old,
         launch_old=not args.no_launch_old,
+        boot_wait=not args.no_boot_wait,
         source=args.source,
         cpu=args.cpu_num,
         memory=args.memory,
