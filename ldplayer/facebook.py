@@ -20,7 +20,7 @@ import time
 from pathlib import Path
 
 from .adb import Adb
-from .automation import Automator
+from .automation import Automator, AutomationError, Waiter
 from .console import LdConsole
 from .instance import Instance
 
@@ -96,10 +96,28 @@ class FacebookFlow:
                   f"(waiting for adb if needed)...")
         self.inst.install_apk_wait(apk, adb_timeout=timeout)
 
-    def open_facebook(self, timeout: float = 120) -> None:
+    def open_facebook(self, timeout: float = 240) -> None:
         self.step("launch", f"opening {self.package} ...")
-        self.inst.run_app(self.package)
-        self.auto.wait_for_focus("facebook", timeout)
+        try:
+            self.inst.run_app(self.package)
+        except Exception as exc:  # noqa: BLE001
+            self.step("launch_warn",
+                      f"runapp failed ({exc}) — continuing to wait for UI")
+        def focused():
+            try:
+                return self.auto.focused_activity()
+            except Exception:
+                return None
+        try:
+            Waiter(timeout, poll=3.0,
+                   label=f"waiting for {self.package} to open").until(
+                lambda: bool(focused() and "facebook" in focused()),
+                "facebook app in the foreground")
+            self.step("launch_ok", "facebook is in the foreground")
+        except AutomationError:
+            self.step("launch_warn",
+                      "could not confirm facebook foreground (adb flaky) — "
+                      "continuing to the 'Create new account' wait")
 
     def click_login_create_account(self, timeout: float = 180,
                                    hold: bool = False) -> None:
