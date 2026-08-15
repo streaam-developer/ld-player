@@ -24,6 +24,7 @@ from ldplayer import backup as backup_mod
 from ldplayer import workflow as workflow_mod
 from ldplayer import repair as repair_mod
 from ldplayer import device as device_mod
+from ldplayer import window as window_mod
 from ldplayer.device import DeviceProfile
 
 
@@ -327,6 +328,18 @@ def cmd_repair(args):
           "if drivers need reinstalling)")
 
 
+def cmd_window(args):
+    """Resize the LDPlayer window so the whole screen is visible."""
+    report = window_mod.fit_window(scale=args.scale, center=not args.top_left)
+    if not report.get("found"):
+        die(report.get("error", "LDPlayer window not found"))
+    b = report["before"]
+    a = report["after"]
+    print(f"LDPlayer window resized: {b[2]-b[0]}x{b[3]-b[1]} -> "
+          f"{a[2]-a[0]}x{a[3]-a[1]} (fits {report['screen'][2]}x"
+          f"{report['screen'][3]} work area)")
+
+
 def _profile_args(args) -> dict:
     resolution = None
     if args.resolution:
@@ -489,7 +502,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="one-shot: unique phone profile + fast/light + launch + install apk")
     inst_args(s)
     profile_opts(s)
-    s.add_argument("--apk", help="APK or .apkm/.xapk bundle to install")
+    s.add_argument("--apk", help="APK or .apkm/.xapk/.apks bundle to install")
     s.add_argument("--no-boot-wait", action="store_true",
                    help="install without waiting for full Android boot")
     s.add_argument("--boot-timeout", type=int, default=600,
@@ -497,6 +510,15 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--timeout", type=int, default=180,
                    help="seconds to wait for the package to register")
     s.set_defaults(func=cmd_setup)
+
+    s = sub.add_parser("window",
+                       help="fit the LDPlayer window to the screen "
+                            "(fixes cut-off/full-screen issues)")
+    s.add_argument("--scale", type=float, default=1.0,
+                   help="shrink the fitted window, e.g. 0.9 leaves a border")
+    s.add_argument("--top-left", action="store_true",
+                   help="place at top-left instead of centering")
+    s.set_defaults(func=cmd_window)
 
     # apps
     s = sub.add_parser("install", help="install an APK")

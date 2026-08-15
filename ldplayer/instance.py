@@ -135,6 +135,7 @@ class Instance:
                         f"install failed: {res.text or res.stderr}")
             else:
                 self._adb.install_multiple(self.index, bundle)
+            _push_obb(self, bundle[0].parent)
             print(f"[{self.name}] installed {apk.name} "
                   f"({len(bundle)} part(s))")
         finally:
@@ -211,16 +212,21 @@ def _package_from_aapt(apk: Path) -> str | None:
     return m.group(1) if m else None
 
 
-def _package_from_info_json(bundle_dir: Path) -> str | None:
-    info = bundle_dir / "info.json"
-    if not info.is_file():
-        return None
-    import json
-    try:
-        data = json.loads(info.read_text(encoding="utf-8"))
-        return data.get("pname")
-    except Exception:
-        return None
+def _package_from_manifest(bundle_dir: Path) -> str | None:
+    """Read package name from info.json (APKMirror) or manifest.json (APKPure)."""
+    for fname in ("info.json", "manifest.json"):
+        info = bundle_dir / fname
+        if not info.is_file():
+            continue
+        try:
+            import json
+            data = json.loads(info.read_text(encoding="utf-8"))
+            pkg = data.get("pname") or data.get("package_name")
+            if pkg:
+                return pkg
+        except Exception:
+            continue
+    return None
 
 
 def _guess_package(apk: Path) -> str:
@@ -240,7 +246,7 @@ def _package_name(apk: Path) -> str | None:
     if apk.suffix.lower() in BUNDLE_SUFFIXES:
         extracted = _prepare_bundle(apk)
         try:
-            pkg = _package_from_info_json(extracted[0].parent)
+            pkg = _package_from_manifest(extracted[0].parent)
             if pkg:
                 return pkg
             for part in extracted:
@@ -270,10 +276,48 @@ def _prepare_bundle(apk: Path) -> list[Path]:
     except zipfile.BadZipFile:
         raise InstanceError(f"{apk.name} is not a valid bundle zip")
 
-    # order: base.apk first, then config splits
-    parts_paths = [dest / p for p in sorted(parts)]
-    parts_paths.sort(key=lambda p: (p.name != "base.apk", p.name))
-    return parts_paths
+    # order: main apk first, then split apks (manifest.json lists the splits)
+    splits: set[str] = set()
+    info = dest / "manifest.json"
+    if info.is_file():
+        try:
+            import json
+            data = json.loads(info.read_text(encoding="utf-8"))
+            splits = {s.get("file", s) if isinstance(s, dict) else s
+                      for s in data.get("split_apks", [])}
+        except Exception:
+            splits = set()
+
+    def order_key(p: Path) -> tuple:
+        in_split = p.name in splits
+        return (in_split, p.name != "base.apk", p.name)
+
+    return sorted((dest / p for p in parts), key=order_key)
+
+
+def _push_obb(self, bundle_dir: Path) -> None:
+    """Push any .obb files from an extracted bundle to the app's obb dir."""
+    obbs = list(bundle_dir.rglob("*.obb")) if bundle_dir.exists() else []
+    if not obbs:
+        return
+    pkg = _package_name_from_dir(bundle_dir)
+    remote = f"/sdcard/Android/obb/{pkg or 'unknown'}"
+    self._adb.shell(self.index, f"mkdir -p {remote}", discover=True)
+    for obb in obbs:
+        self._adb.push(self.index, obb, f"{remote}/{obb.name}",
+                       discover=True)
+        print(f"[{self.name}] pushed obb {obb.name}")
+
+
+def _package_name_from_dir(bundle_dir: Path) -> str | None:
+    pkg = _package_from_manifest(bundle_dir)
+    if pkg:
+        return pkg
+    for apk in bundle_dir.rglob("*.apk"):
+        pkg = _package_from_aapt(apk)
+        if pkg:
+            return pkg
+    return None
 
 
 def _cleanup_bundle(apk: Path, parts: list[Path]) -> None:
