@@ -100,6 +100,26 @@ class Adb:
         except AdbError:
             return False
 
+    def wait_ready(self, index: int, timeout: float = 300,
+                   poll: float = 10) -> str:
+        """Poll until an adb serial for the instance becomes available."""
+        deadline = time.time() + timeout
+        last_err: AdbError | None = None
+        tick = 0
+        while time.time() < deadline:
+            try:
+                return self.discover(index)
+            except AdbError as e:
+                last_err = e
+                tick += 1
+                if tick % 6 == 0:
+                    print(f"  ...still waiting for adb "
+                          f"({int(deadline - time.time())}s left)")
+                time.sleep(poll)
+        raise AdbError(
+            f"adb device for LDPlayer index {index} not available within "
+            f"{timeout}s (last: {last_err})")
+
     # ------------------------------------------------------------------ core
     def _run(self, args: list[str], timeout: int | None = None) -> str:
         cmd = [self.adb] + args
@@ -149,22 +169,61 @@ class Adb:
 
     def install_multiple(self, index: int, apks: list[str | Path],
                          discover: bool = True) -> None:
-        """Install split APKs together (base + config splits, same signature)."""
+        """Install split APKs together (base + config splits, same signature).
+
+        Parts are pushed to the device's own storage first (each push retried
+        individually so a flaky adb bridge can't lose the whole transfer),
+        then installed locally with a single short `pm install-multiple`.
+        """
         if len(apks) == 1:
-            self._run(["-s", self._serial(index, discover), "install", "-t",
-                       str(apks[0])])
+            self._install_one(index, apks[0], discover)
             return
-        cmd = [self.adb, "-s", self._serial(index, discover),
-               "install-multiple", "-t"] + [str(a) for a in apks]
-        proc = subprocess.run(cmd, capture_output=True, text=True,
-                              timeout=self.timeout, check=False)
-        if proc.returncode != 0:
-            raise AdbError(
-                f"adb install-multiple failed ({proc.returncode}): "
-                f"{proc.stdout.strip() or proc.stderr.strip()}")
-        if "Success" not in proc.stdout:
-            raise AdbError(f"adb install-multiple did not report Success: "
-                           f"{proc.stdout.strip()}")
+
+        remote_dir = "/data/local/tmp/ldcli"
+        self.shell(index, ["mkdir", "-p", remote_dir], timeout=30,
+                   discover=discover)
+        remote_paths = []
+        for apk in apks:
+            remote = f"{remote_dir}/{Path(apk).name}"
+            self._push_retry(index, apk, remote, discover)
+            remote_paths.append(remote)
+
+        try:
+            out = self.shell(index, ["pm", "install-multiple", "-t"] +
+                             remote_paths, timeout=300, discover=discover)
+            if "Success" not in out:
+                raise AdbError(
+                    f"pm install-multiple did not report Success: {out.strip()}")
+        finally:
+            self.shell(index, ["rm", "-rf", remote_dir], timeout=30,
+                       discover=discover)
+
+    def _install_one(self, index: int, apk: str | Path,
+                     discover: bool = True) -> None:
+        remote = f"/data/local/tmp/{Path(apk).name}"
+        self._push_retry(index, apk, remote, discover)
+        try:
+            out = self.shell(index, ["pm", "install", "-t", remote],
+                             timeout=300, discover=discover)
+            if "Success" not in out:
+                raise AdbError(f"pm install did not report Success: {out.strip()}")
+        finally:
+            self.shell(index, ["rm", "-f", remote], timeout=30, discover=discover)
+
+    def _push_retry(self, index: int, apk: str | Path, remote: str,
+                    discover: bool, attempts: int = 8) -> None:
+        """Push one file, retrying across connection windows."""
+        last: AdbError | None = None
+        for i in range(attempts):
+            try:
+                self.push(index, apk, remote, discover=discover)
+                return
+            except AdbError as e:
+                last = e
+                print(f"  push attempt {i + 1}/{attempts} interrupted "
+                      f"({Path(apk).name}); retrying...")
+                time.sleep(3)
+        raise AdbError(f"could not push {Path(apk).name} to device: {last}")
 
     def pull(self, index: int, remote: str, local: str | Path,
              discover: bool = False) -> str:

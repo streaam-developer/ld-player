@@ -142,8 +142,13 @@ class Instance:
             _cleanup_bundle(apk, bundle)
 
     def install_apk_wait(self, apk: str | Path,
-                         timeout: float = 180) -> str | None:
-        """Install and wait until the app's package registers. Returns pkg."""
+                         timeout: float = 180,
+                         adb_timeout: float = 600) -> str | None:
+        """Retry: wait for adb, install, then wait until the package registers.
+
+        The LDPlayer guest's adb bridge can flap (drops mid-transfer) on weak
+        hosts, so we keep retrying until the package is actually registered.
+        """
         apk = Path(apk)
         if not apk.is_file():
             raise InstanceError(f"APK not found: {apk}")
@@ -151,15 +156,43 @@ class Instance:
         if not pkg:
             raise InstanceError(
                 f"could not determine package name for {apk.name}")
-        print(f"[{self.name}] installing {apk.name} (package {pkg}) ...")
-        self.install_apk(apk)
-        deadline = time.time() + timeout
+
+        deadline = time.time() + max(adb_timeout, timeout) + 120
+        attempt = 0
         while time.time() < deadline:
-            if self._adb.package_installed(self.index, pkg, discover=True):
-                print(f"[{self.name}] package {pkg} present")
-                return pkg
-            time.sleep(3)
-        raise InstanceError(f"package {pkg} did not appear within {timeout}s")
+            attempt += 1
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                break
+            print(f"[{self.name}] waiting for adb (attempt {attempt}, "
+                  f"up to {remaining:.0f}s left)...")
+            try:
+                self._adb.wait_ready(self.index, timeout=remaining, poll=5)
+            except AdbError:
+                continue
+            print(f"[{self.name}] installing {apk.name} "
+                  f"(package {pkg}) ...")
+            try:
+                self.install_apk(apk)
+            except (InstanceError, AdbError) as e:
+                if "OLDER_SDK" in str(e).upper():
+                    raise _sdk_hint(apk, e)
+                print(f"[{self.name}] install attempt {attempt} failed "
+                      f"({e}); retrying...")
+                time.sleep(5)
+                continue
+            deadline_ok = time.time() + timeout
+            while time.time() < deadline_ok:
+                if self._adb.package_installed(self.index, pkg, discover=True):
+                    print(f"[{self.name}] package {pkg} present")
+                    return pkg
+                time.sleep(3)
+            print(f"[{self.name}] installed but {pkg} not registered yet; "
+                  f"rechecking...")
+        raise InstanceError(
+            f"could not install {apk.name}: adb stayed unavailable for the "
+            f"whole window (instance may need more RAM, or the host is under "
+            f"too much memory pressure)")
 
     def run_app(self, package: str) -> None:
         res = self._console.run_app(package, index=self.index)
@@ -293,6 +326,18 @@ def _prepare_bundle(apk: Path) -> list[Path]:
         return (in_split, p.name != "base.apk", p.name)
 
     return sorted((dest / p for p in parts), key=order_key)
+
+
+def _sdk_hint(apk: Path, err: InstanceError) -> InstanceError:
+    """Rewrite confusing install failures with a helpful SDK hint."""
+    msg = str(err)
+    if "OLDER_SDK" in msg or "OLDER_SDK" in msg.upper():
+        return InstanceError(
+            f"{msg}\n  => the app needs a newer Android than this instance "
+            f"provides (Android 9 images run 'minSdk <= 28'; apps targeting "
+            f"newer Android 13+ may need an LDPlayer 9 64-bit / Android 9+ "
+            f"instance). Try `ldcli add <name> --android 9` if available.")
+    return err
 
 
 def _push_obb(self, bundle_dir: Path) -> None:

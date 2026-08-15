@@ -159,7 +159,7 @@ def cmd_install(args):
     console, adb, _ = _session(args)
     inst = _instance(args, console, adb)
     if args.wait:
-        inst.install_apk_wait(args.apk)
+        inst.install_apk_wait(args.apk, adb_timeout=args.adb_timeout)
     else:
         inst.install_apk(args.apk)
 
@@ -391,10 +391,10 @@ def cmd_setup(args):
 
     inst = Instance(console, adb, name=name, index=index)
     inst.resolve()
-    inst.launch(boot_wait=not args.no_boot_wait,
-                boot_timeout=args.boot_timeout)
+    inst.launch(boot_wait=False)
 
-    pkg = inst.install_apk_wait(apk, timeout=args.timeout)
+    pkg = inst.install_apk_wait(apk, timeout=args.timeout,
+                                adb_timeout=args.boot_timeout)
     print(f"[{name or index}] done: {pkg} installed, instance ready")
 
 
@@ -504,9 +504,9 @@ def build_parser() -> argparse.ArgumentParser:
     profile_opts(s)
     s.add_argument("--apk", help="APK or .apkm/.xapk/.apks bundle to install")
     s.add_argument("--no-boot-wait", action="store_true",
-                   help="install without waiting for full Android boot")
+                   help="deprecated (install now waits for adb, not boot)")
     s.add_argument("--boot-timeout", type=int, default=600,
-                   help="seconds to wait for Android boot (default 600)")
+                   help="seconds to wait for adb before install (default 600)")
     s.add_argument("--timeout", type=int, default=180,
                    help="seconds to wait for the package to register")
     s.set_defaults(func=cmd_setup)
@@ -521,11 +521,15 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_window)
 
     # apps
-    s = sub.add_parser("install", help="install an APK")
+    s = sub.add_parser("install",
+                       help="install an APK or .apkm/.xapk/.apks bundle")
     inst_args(s)
     s.add_argument("apk")
     s.add_argument("--wait", action="store_true",
-                   help="wait until the package is registered")
+                   help="wait for adb (up to --adb-timeout) then poll the "
+                        "package until it registers")
+    s.add_argument("--adb-timeout", type=int, default=600,
+                   help="seconds to wait for the instance's adb (default 600)")
     s.set_defaults(func=cmd_install)
 
     s = sub.add_parser("uninstall", help="uninstall an app")
