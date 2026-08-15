@@ -73,7 +73,15 @@ class FacebookFlow:
         self.report[tag] = {"time": time.time(), "msg": msg}
 
     def open_instance_and_launcher(self, timeout: float = 600) -> None:
-        self.step("instance", "waiting for boot + launcher (apps grid)...")
+        self.step("instance", f"checking {self.inst.name} status...")
+        if not self.inst.running:
+            self.step("instance",
+                      f"{self.inst.name} is stopped — starting it now...")
+            self.inst.launch(wait=True, boot_wait=False)
+        else:
+            self.step("instance", f"{self.inst.name} already running")
+        self.step("instance",
+                  "waiting for boot + launcher (apps grid)...")
         self.auto.wait_for_home(timeout)
 
     def ensure_facebook_installed(self, apk_path: str | Path | None = None,

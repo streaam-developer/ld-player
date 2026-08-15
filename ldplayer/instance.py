@@ -78,6 +78,11 @@ class Instance:
     def adb_port(self) -> int:
         return self._adb.port_for(self.index)
 
+    @property
+    def running(self) -> bool:
+        self.resolve()
+        return self._console.is_running(index=self.index)
+
     # ------------------------------------------------------------- lifecycle
     def launch(self, wait: bool = True, boot_wait: bool = True,
                boot_timeout: float | None = None) -> "Instance":

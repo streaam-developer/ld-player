@@ -25,18 +25,27 @@ class AutomationError(RuntimeError):
 class Waiter:
     """Poll a predicate until it succeeds or the deadline passes."""
 
-    def __init__(self, timeout: float = 120, poll: float = 2.0):
+    def __init__(self, timeout: float = 120, poll: float = 2.0,
+                 label: str = "waiting"):
         self.timeout = timeout
         self.poll = poll
+        self.label = label
 
     def until(self, predicate, description: str = "condition"):
-        deadline = time.time() + self.timeout
+        start = time.time()
+        deadline = start + self.timeout
+        last_tick = 0.0
         while time.time() < deadline:
             try:
                 if predicate():
                     return True
             except Exception:
                 pass
+            now = time.time()
+            if now - last_tick >= 10:
+                last_tick = now
+                print(f"  ... still {self.label} "
+                      f"({now - start:.0f}/{self.timeout:.0f}s)")
             time.sleep(self.poll)
         raise AutomationError(f"timed out waiting for {description} "
                               f"({self.timeout}s)")
@@ -160,7 +169,7 @@ class Automator:
         def pred():
             pos = self.find_text(text)
             return pos
-        pos = Waiter(timeout, poll=2.0).until(
+        pos = Waiter(timeout, poll=2.0, label=f"looking for '{text}'").until(
             pred, f"text '{text}' on screen")
         if click:
             self.tap(*pos)
@@ -188,9 +197,11 @@ class Automator:
         def booted():
             return self.adb.is_boot_completed(self.instance.index,
                                               discover=True)
-        Waiter(timeout, poll=5.0).until(booted, "Android boot completed")
+        Waiter(timeout, poll=5.0, label="waiting for boot").until(
+            booted, "Android boot completed")
         self.home()
         def launcher():
             focus = self.focused_activity()
             return focus and "launcher" in focus.lower()
-        Waiter(timeout, poll=2.0).until(launcher, "launcher focused")
+        Waiter(timeout, poll=2.0, label="waiting for launcher").until(
+            launcher, "launcher focused")
