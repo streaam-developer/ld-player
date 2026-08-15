@@ -163,9 +163,10 @@ class Adb:
         return proc.stdout
 
     def push(self, index: int, local: str | Path, remote: str,
-             discover: bool = False) -> str:
+             discover: bool = False, timeout: int | None = None) -> str:
         return self._run(
-            ["-s", self._serial(index, discover), "push", str(local), remote])
+            ["-s", self._serial(index, discover), "push", str(local), remote],
+            timeout=timeout or 600)
 
     def install_multiple(self, index: int, apks: list[str | Path],
                          discover: bool = True) -> None:
