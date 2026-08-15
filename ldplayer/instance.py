@@ -395,12 +395,16 @@ def create_instance(console: LdConsole, name: str, source: str | None = None,
         inst = console.find(name=name)
         if not inst or not res.ok:
             raise InstanceError(f"create failed: {res.text or res.stderr}")
-    if cpu is not None or memory is not None or resolution is not None:
-        res = console.modify(name=name, cpu=cpu, memory=memory,
-                             resolution=resolution)
-        if not res.ok:
-            raise InstanceError(f"modify after create failed: "
-                                f"{res.text or res.stderr}")
-    print(f"created instance '{name}' (index {inst.index})"
+    # every instance defaults to 2 cores / 2 GB / phone portrait
+    cpu = cpu if cpu is not None else 2
+    memory = memory if memory is not None else 2048
+    resolution = resolution or "720,1280,320"
+    res = console.modify(name=name, cpu=cpu, memory=memory,
+                         resolution=resolution)
+    if not res.ok:
+        raise InstanceError(f"modify after create failed: "
+                            f"{res.text or res.stderr}")
+    print(f"created instance '{name}' (index {inst.index}) "
+          f"cpu={cpu} mem={memory} res={resolution}"
           + (f" cloned from '{source}'" if source else ""))
     return inst

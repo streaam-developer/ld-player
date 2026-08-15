@@ -120,18 +120,30 @@ def cmd_quit(args):
     print("quit")
 
 
+def _normalize_resolution(res: str | None) -> str | None:
+    """Convert 'WxH[xDPI]' or 'W,H[,DPI]' into LDPlayer's 'W,H,DPI'."""
+    if not res:
+        return None
+    parts = res.replace("x", ",").replace("X", ",").split(",")
+    parts = [p.strip() for p in parts if p.strip()]
+    if len(parts) == 2:
+        parts.append("240")
+    return ",".join(parts)
+
+
 def cmd_add(args):
     console, _, _ = _session(args)
     create_instance(console, args.name, source=args.source,
                     cpu=args.cpu_num, memory=args.memory,
-                    resolution=args.resolution)
+                    resolution=_normalize_resolution(args.resolution))
 
 
 def cmd_modify(args):
     console, _, _ = _session(args)
     name, index = _pick(args, console)
     res = console.modify(name=name, index=index, cpu=args.cpu_num,
-                         memory=args.memory, resolution=args.resolution)
+                         memory=args.memory,
+                         resolution=_normalize_resolution(args.resolution))
     if not res.ok:
         die(res.text or res.stderr)
     print("modified")
@@ -444,12 +456,13 @@ def build_parser() -> argparse.ArgumentParser:
     inst_args(s)
     s.set_defaults(func=cmd_quit)
 
-    s = sub.add_parser("add", help="create a new instance")
+    s = sub.add_parser("add", help="create a new instance "
+                        "(defaults: 2 cores / 2 GB / 720x1280@320)")
     s.add_argument("name", help="new instance name")
     s.add_argument("--source", help="clone from an existing instance")
-    s.add_argument("--cpu-num", type=int)
-    s.add_argument("--memory", type=int, help="MB of RAM")
-    s.add_argument("--resolution", help="e.g. 1280x720")
+    s.add_argument("--cpu-num", type=int, help="CPU cores (default 2)")
+    s.add_argument("--memory", type=int, help="MB of RAM (default 2048)")
+    s.add_argument("--resolution", help="e.g. 720x1280 or 720x1280x320")
     s.set_defaults(func=cmd_add)
 
     s = sub.add_parser("modify", help="change CPU/RAM/resolution")
@@ -475,11 +488,10 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--seed", type=int,
                         help="reproducible profile seed")
         sp.add_argument("--cpu-num", type=int, choices=[1, 2, 3, 4],
-                        help="CPU cores (default 4)")
-        sp.add_argument("--memory", type=int, help="RAM in MB (default 768 "
-                        "in light mode, else 1024)")
+                        help="CPU cores (default 2)")
+        sp.add_argument("--memory", type=int, help="RAM in MB (default 2048)")
         sp.add_argument("--resolution",
-                        help="resolution W,H[,dpi] e.g. 1280,720,240 or 960x540")
+                        help="resolution W,H[,dpi] e.g. 720,1280,320 or 960x540")
         sp.add_argument("--root", action="store_true", help="enable root")
         if default_fast:
             sp.add_argument("--no-fast", action="store_true",

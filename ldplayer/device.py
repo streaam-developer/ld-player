@@ -121,9 +121,9 @@ def _rand_hex(n: int, rng) -> str:
 
 
 def generate_profile(vendor: str | None = None, seed: int | None = None,
-                     cpu: int = 4, memory: int = 1024,
-                     resolution: str = "1280,720,240") -> DeviceProfile:
-    """Build a fresh, realistic, unique device profile."""
+                     cpu: int = 2, memory: int = 2048,
+                     resolution: str = "720,1280,320") -> DeviceProfile:
+    """Build a fresh, realistic, unique device profile (default 2c/2GB)."""
     rng = random.Random(seed) if seed is not None else random
 
     if vendor and vendor.lower() in VENDORS:
@@ -169,9 +169,9 @@ def apply_profile(console: LdConsole, name: str | None = None,
     if profile is None:
         profile = generate_profile(
             vendor=vendor, seed=seed,
-            cpu=cpu if cpu is not None else 4,
-            memory=memory if memory is not None else (768 if light else 1024),
-            resolution=resolution or ("960,540,240" if light else "1280,720,240"),
+            cpu=cpu if cpu is not None else 2,
+            memory=memory if memory is not None else 2048,
+            resolution=resolution or "720,1280,320",
         )
 
     res = console.modify(
