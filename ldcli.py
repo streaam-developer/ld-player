@@ -312,6 +312,12 @@ def cmd_console(args):
     sys.exit(res.returncode)
 
 
+def cmd_ui(_):
+    """Launch the interactive control center (see ldui.py)."""
+    import ldui
+    raise SystemExit(ldui.main())
+
+
 def cmd_props(args):
     console, adb, _ = _session(args)
     inst = _instance(args, console, adb)
@@ -670,6 +676,11 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("console", help="run a raw ldconsole command")
     s.add_argument("command", nargs=argparse.REMAINDER)
     s.set_defaults(func=cmd_console)
+
+    s = sub.add_parser(
+        "ui", help="launch the interactive control center (menus for "
+                   "instances, apps, backup, profiles, automation, config)")
+    s.set_defaults(func=cmd_ui)
 
     s = sub.add_parser("props", help="show resolved instance properties")
     inst_args(s)

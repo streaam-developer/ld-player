@@ -262,10 +262,18 @@ class Adb:
         self.keyevent(index, 82, discover)    # MENU (unlock)
 
     def is_boot_completed(self, index: int, discover: bool = True) -> bool:
+        """True once Android is up. LDPlayer sometimes leaves
+        ``sys.boot_completed`` empty, so also accept ``dev.bootcomplete`` and
+        a responsive boot animation service as evidence."""
         try:
-            out = self.shell(index, ["getprop", "sys.boot_completed"],
+            for prop in ("sys.boot_completed", "dev.bootcomplete"):
+                out = self.shell(index, ["getprop", prop],
+                                 timeout=20, discover=discover)
+                if out.strip() == "1":
+                    return True
+            out = self.shell(index, ["getprop", "init.svc.bootanim"],
                              timeout=20, discover=discover)
-            return out.strip() == "1"
+            return out.strip() == "stopped"
         except AdbError:
             return False
 

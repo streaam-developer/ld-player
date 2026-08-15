@@ -193,15 +193,29 @@ class Automator:
         time.sleep(1)
 
     def wait_for_home(self, timeout: float = 180) -> None:
-        """Wait until the instance is booted and the launcher is focused."""
-        def booted():
-            return self.adb.is_boot_completed(self.instance.index,
-                                              discover=True)
-        Waiter(timeout, poll=5.0, label="waiting for boot").until(
-            booted, "Android boot completed")
-        self.home()
-        def launcher():
+        """Wait until the instance is up and the launcher is focused.
+
+        LDPlayer often never reports ``sys.boot_completed=1`` even though the
+        system is fully up, so treat a focused launcher as proof of boot too —
+        this is what the user observes (instance usable ~60s after launch).
+        """
+        def launcher_focused():
             focus = self.focused_activity()
             return focus and "launcher" in focus.lower()
+
+        def booted_or_launcher():
+            return (self.adb.is_boot_completed(self.instance.index,
+                                               discover=True)
+                    or launcher_focused())
+
+        try:
+            Waiter(timeout, poll=3.0, label="waiting for boot + launcher").until(
+                booted_or_launcher, "Android boot completed / launcher focused")
+        except AutomationError:
+            # boot prop never flips; keep polling the launcher below
+            pass
+        self.home()
+        def launcher():
+            return launcher_focused()
         Waiter(timeout, poll=2.0, label="waiting for launcher").until(
             launcher, "launcher focused")
