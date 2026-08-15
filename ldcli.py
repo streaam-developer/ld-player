@@ -362,7 +362,7 @@ def cmd_facebook(args):
     facebook_mod.signup_flow(console, adb, index=index, name=name,
                              package=args.package, step_wait=args.step_wait,
                              hold=args.hold, grant_perms=not args.no_grant,
-                             boot_timeout=args.boot_timeout)
+                             boot_timeout=args.boot_timeout, apk_path=args.apk)
     print(f"[{name or index}] signup flow finished")
 
 
@@ -552,6 +552,10 @@ def build_parser() -> argparse.ArgumentParser:
              "launch FB -> tap 'Create new account' (x2) -> allow permissions")
     inst_args(s)
     s.add_argument("--package", default="com.facebook.katana")
+    s.add_argument("--apk",
+                   help="path to the Facebook apk/apkm/xapk to install if "
+                        "Facebook is not installed yet (auto-detected from "
+                        "the working directory otherwise)")
     s.add_argument("--step-wait", type=float, default=3.0,
                    help="pause between steps (seconds)")
     s.add_argument("--hold", action="store_true",

@@ -32,6 +32,10 @@ def main() -> int:
     p.add_argument("--index", type=int, help="instance index")
     p.add_argument("--name", help="instance name")
     p.add_argument("--package", default="com.facebook.katana")
+    p.add_argument("--apk",
+                   help="path to the Facebook apk/apkm/xapk to install if "
+                        "Facebook is not installed yet (auto-detected from "
+                        "the working directory otherwise)")
     p.add_argument("--step-wait", type=float, default=3.0,
                    help="pause between steps (seconds)")
     p.add_argument("--hold", action="store_true",
@@ -49,7 +53,7 @@ def main() -> int:
     signup_flow(console, adb, index=args.index, name=args.name,
                 package=args.package, step_wait=args.step_wait,
                 hold=args.hold, grant_perms=not args.no_grant,
-                boot_timeout=args.boot_timeout)
+                boot_timeout=args.boot_timeout, apk_path=args.apk)
     print("signup flow finished")
     return 0
 
