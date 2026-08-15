@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Backups created by the tool
+backups/
+*.7z
+*.ldbk
+*.ab
+
+# Tool config
+*.local.json
