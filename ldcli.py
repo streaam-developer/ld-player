@@ -25,6 +25,7 @@ from ldplayer import workflow as workflow_mod
 from ldplayer import repair as repair_mod
 from ldplayer import device as device_mod
 from ldplayer import window as window_mod
+from ldplayer import facebook as facebook_mod
 from ldplayer.device import DeviceProfile
 
 
@@ -352,6 +353,19 @@ def cmd_window(args):
           f"{report['screen'][3]} work area)")
 
 
+def cmd_facebook(args):
+    """Automate the Facebook 'create new account' flow."""
+    console, adb, _ = _session(args)
+    name, index = _pick(args, console)
+    if name is None and index is None:
+        index = 0
+    facebook_mod.signup_flow(console, adb, index=index, name=name,
+                             package=args.package, step_wait=args.step_wait,
+                             hold=args.hold, grant_perms=not args.no_grant,
+                             boot_timeout=args.boot_timeout)
+    print(f"[{name or index}] signup flow finished")
+
+
 def _profile_args(args) -> dict:
     resolution = None
     if args.resolution:
@@ -531,6 +545,23 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--top-left", action="store_true",
                    help="place at top-left instead of centering")
     s.set_defaults(func=cmd_window)
+
+    s = sub.add_parser(
+        "facebook",
+        help="automate the Facebook create-account flow: open instance -> "
+             "launch FB -> tap 'Create new account' (x2) -> allow permissions")
+    inst_args(s)
+    s.add_argument("--package", default="com.facebook.katana")
+    s.add_argument("--step-wait", type=float, default=3.0,
+                   help="pause between steps (seconds)")
+    s.add_argument("--hold", action="store_true",
+                   help="pause after the first 'Create new account' tap "
+                        "until you press Enter")
+    s.add_argument("--no-grant", action="store_true",
+                   help="skip pre-granting contacts/location permissions")
+    s.add_argument("--boot-timeout", type=int, default=600,
+                   help="seconds to wait for boot + launcher")
+    s.set_defaults(func=cmd_facebook)
 
     # apps
     s = sub.add_parser("install",

@@ -1,11 +1,12 @@
 """UI automation primitives layered on top of adb.
 
-Provides coordinate actions, waits/polls, and reusable helper patterns
-(screen info, screenshot, package/app checks).
+Provides coordinate actions, waits/polls, UI-tree text detection (uiautomator),
+permission granting, and reusable helper patterns.
 """
 
 from __future__ import annotations
 
+import re
 import time
 
 from pathlib import Path
@@ -13,6 +14,8 @@ from pathlib import Path
 from .adb import Adb
 from .console import LdConsole
 from .instance import Instance
+
+_NODE_RE = re.compile(r"<node\b[^>]*/>")
 
 
 class AutomationError(RuntimeError):
@@ -111,6 +114,64 @@ class Automator:
         Waiter(timeout, poll=1.0).until(
             pred, f"focus containing '{activity_fragment}'")
 
+    # ------------------------------------------------------- UI-tree / text
+    def dump_ui(self) -> str:
+        """Return the current UI hierarchy XML (uiautomator dump)."""
+        try:
+            return self.adb.shell(self.instance.index,
+                                  ["uiautomator", "dump", "/dev/tty"],
+                                  timeout=30, discover=True)
+        except Exception:
+            self.adb.shell(self.instance.index,
+                           ["uiautomator", "dump", "/sdcard/ldcli_ui.xml"],
+                           timeout=30, discover=True)
+            return self.adb.shell(self.instance.index,
+                                  ["cat", "/sdcard/ldcli_ui.xml"],
+                                  timeout=30, discover=True)
+
+    def _text_nodes(self, xml: str) -> list[tuple[str, int, int]]:
+        """Yield (text, cx, cy) for every UI node with text + bounds."""
+        found = []
+        for m in _NODE_RE.finditer(xml):
+            node = m.group(0)
+            t = re.search(r'text="([^"]*)"', node)
+            b = re.search(r'bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', node)
+            if t and b and t.group(1).strip():
+                cx = (int(b.group(1)) + int(b.group(3))) // 2
+                cy = (int(b.group(2)) + int(b.group(4))) // 2
+                found.append((t.group(1), cx, cy))
+        return found
+
+    def find_text(self, text: str) -> tuple[int, int] | None:
+        """Find the center of a UI node whose text contains `text`."""
+        try:
+            xml = self.dump_ui()
+        except Exception:
+            return None
+        low = text.lower()
+        for label, cx, cy in self._text_nodes(xml):
+            if low in label.lower():
+                return cx, cy
+        return None
+
+    def wait_for_text(self, text: str, timeout: float = 120,
+                      click: bool = False) -> tuple[int, int]:
+        """Poll until `text` is on screen; optionally tap it. Returns (x, y)."""
+        def pred():
+            pos = self.find_text(text)
+            return pos
+        pos = Waiter(timeout, poll=2.0).until(
+            pred, f"text '{text}' on screen")
+        if click:
+            self.tap(*pos)
+        return pos
+
+    def grant_permission(self, package: str, permission: str) -> None:
+        """Grant a runtime permission without touching the UI dialog."""
+        self.adb.shell(self.instance.index,
+                       ["pm", "grant", package, permission], timeout=30,
+                       discover=True)
+
     # ------------------------------------------------------------ convenience
     def wait_and_tap(self, activity_fragment: str, x: int, y: int,
                      timeout: float = 120) -> None:
@@ -121,3 +182,15 @@ class Automator:
     def back_to_home(self) -> None:
         self.home()
         time.sleep(1)
+
+    def wait_for_home(self, timeout: float = 180) -> None:
+        """Wait until the instance is booted and the launcher is focused."""
+        def booted():
+            return self.adb.is_boot_completed(self.instance.index,
+                                              discover=True)
+        Waiter(timeout, poll=5.0).until(booted, "Android boot completed")
+        self.home()
+        def launcher():
+            focus = self.focused_activity()
+            return focus and "launcher" in focus.lower()
+        Waiter(timeout, poll=2.0).until(launcher, "launcher focused")
