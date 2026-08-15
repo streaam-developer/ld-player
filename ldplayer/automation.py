@@ -45,7 +45,7 @@ class Waiter:
             if now - last_tick >= 10:
                 last_tick = now
                 print(f"  ... still {self.label} "
-                      f"({now - start:.0f}/{self.timeout:.0f}s)")
+                      f"({now - start:.0f}/{self.timeout:.0f}s)", flush=True)
             time.sleep(self.poll)
         raise AutomationError(f"timed out waiting for {description} "
                               f"({self.timeout}s)")

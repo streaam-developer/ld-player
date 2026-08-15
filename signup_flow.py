@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import traceback
 
 from pathlib import Path
 
@@ -28,6 +29,11 @@ from ldplayer.facebook import signup_flow
 
 
 def main() -> int:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(line_buffering=True)
+
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--index", type=int, help="instance index")
     p.add_argument("--name", help="instance name")
@@ -50,10 +56,15 @@ def main() -> int:
     cfg = load_config()
     adb = Adb(cfg["adb"])
 
-    signup_flow(console, adb, index=args.index, name=args.name,
-                package=args.package, step_wait=args.step_wait,
-                hold=args.hold, grant_perms=not args.no_grant,
-                boot_timeout=args.boot_timeout, apk_path=args.apk)
+    try:
+        signup_flow(console, adb, index=args.index, name=args.name,
+                    package=args.package, step_wait=args.step_wait,
+                    hold=args.hold, grant_perms=not args.no_grant,
+                    boot_timeout=args.boot_timeout, apk_path=args.apk)
+    except Exception as exc:
+        print(f"\nERROR: {exc}", flush=True)
+        traceback.print_exc()
+        return 1
     print("signup flow finished")
     return 0
 

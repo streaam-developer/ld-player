@@ -69,7 +69,7 @@ class FacebookFlow:
 
     # ---------------------------------------------------------------- steps
     def step(self, tag: str, msg: str) -> None:
-        print(f"[{self.inst.name}] {msg}")
+        print(f"[{self.inst.name}] {msg}", flush=True)
         self.report[tag] = {"time": time.time(), "msg": msg}
 
     def open_instance_and_launcher(self, timeout: float = 600) -> None:
@@ -102,7 +102,17 @@ class FacebookFlow:
             self.inst.run_app(self.package)
         except Exception as exc:  # noqa: BLE001
             self.step("launch_warn",
-                      f"runapp failed ({exc}) — continuing to wait for UI")
+                      f"runapp failed ({exc}) — retrying via adb monkey...")
+            try:
+                self.auto.adb.shell(
+                    self.inst.index,
+                    ["monkey", "-p", self.package,
+                     "-c", "android.intent.category.LAUNCHER", "1"],
+                    timeout=60, discover=True)
+            except Exception as exc2:  # noqa: BLE001
+                self.step("launch_warn",
+                          f"adb monkey fallback also failed ({exc2}) — "
+                          "continuing to wait for UI")
         def focused():
             try:
                 return self.auto.focused_activity()

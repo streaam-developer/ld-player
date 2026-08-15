@@ -115,7 +115,8 @@ class Instance:
                 if self._adb.is_boot_completed(self.index, discover=True):
                     self._adb.wake(self.index, discover=True)
                     print(f"[{self.name}] boot completed "
-                          f"(adb {self._adb.endpoint(self.index)})")
+                          f"(adb {self._adb.endpoint(self.index)})",
+                          flush=True)
                     return
                 last = "not booted"
             except Exception as exc:  # noqa: BLE001
