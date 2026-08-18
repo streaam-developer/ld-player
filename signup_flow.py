@@ -11,6 +11,8 @@ Flow:
   5. wait for the Contacts permission prompt and tap "Allow"
   6. enter first/last name, tap Next
   7. open birthday picker, scroll year >20 years back, tap Set, tap Next
+  8. select Male, tap Next
+  9. tap "Sign up with email", enter random email, tap Next
 
 Use --hold to pause after step 3 (press Enter to continue).
 """

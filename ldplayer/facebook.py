@@ -11,6 +11,8 @@ Flow (matches the requested sequence):
 6. wait for the permission prompt (e.g. Contacts) and tap "Allow"
 7. enter first/last name and press Next
 8. open the birthday picker, scroll year back >20 years, press Set, press Next
+9. select Male on the gender screen, press Next
+10. tap "Sign up with email", enter random email, press Next
 
 Steps log their progress; `--hold` pauses after step 4 for manual inspection.
 """
@@ -48,6 +50,16 @@ NEXT_BUTTON = "Next"
 BIRTHDAY_SCREEN_HEADER = "What's your birthday"
 SET_BUTTON = "Set"
 DATE_PICKER_DONE = "Set"
+
+#: Gender screen
+GENDER_SCREEN_HEADER = "What's your gender"
+GENDER_MALE = "Male"
+
+#: Mobile / email screen
+MOBILE_SCREEN_HEADER = "What's your mobile number"
+SIGN_UP_WITH_EMAIL = "Sign up with email"
+EMAIL_SCREEN_HEADER = "What's your email"
+EMAIL_DOMAIN = "dailykhabar.cfd"
 
 #: runtime permissions worth pre-granting so the dialog resolves cleanly
 SIGNUP_PERMISSIONS = [
@@ -384,6 +396,78 @@ class FacebookFlow:
 
         time.sleep(1)
 
+    # -------------------------------------------------------- gender
+    def select_gender(self, gender: str = "Male",
+                      timeout: float = 60) -> None:
+        """Wait for the 'What's your gender?' screen, tap the requested
+        option, then press Next."""
+        self.step("gender_screen",
+                  f"waiting for '{GENDER_SCREEN_HEADER}' ...")
+        self.auto.wait_for_text(GENDER_SCREEN_HEADER, timeout)
+        time.sleep(1)
+
+        self.step("gender_select", f"selecting '{gender}' ...")
+        pos = self._wait_for_text_with_retry(gender, timeout)
+        self.auto.tap(*pos, wait=1.5)
+
+        next_pos = self._wait_for_text_with_retry(NEXT_BUTTON, timeout)
+        self.step("gender_next", f"clicking Next at {next_pos}")
+        self.auto.tap(*next_pos, wait=2)
+        self._wait_for_screen_change(NEXT_BUTTON, timeout=30)
+
+    # -------------------------------------------------------- email signup
+    def enter_email(self, email: str | None = None,
+                    timeout: float = 60) -> None:
+        """Wait for the mobile-number screen, tap 'Sign up with email',
+        wait for the email entry screen, type the address, press Next.
+
+        If *email* is ``None`` a random 7-letter address at
+        ``dailykhabar.cfd`` is generated.
+        """
+        self.step("mobile_screen",
+                  f"waiting for '{MOBILE_SCREEN_HEADER}' ...")
+        self.auto.wait_for_text(MOBILE_SCREEN_HEADER, timeout)
+        time.sleep(1)
+
+        self.step("email_switch", "tapping 'Sign up with email' ...")
+        email_btn = self._wait_for_text_with_retry(SIGN_UP_WITH_EMAIL, timeout)
+        self.auto.tap(*email_btn, wait=2)
+        self._wait_for_screen_change(SIGN_UP_WITH_EMAIL, timeout=30)
+
+        if email is None:
+            email = self._random_email()
+        self.step("email_screen",
+                  f"waiting for '{EMAIL_SCREEN_HEADER}' ...")
+        self.auto.wait_for_text(EMAIL_SCREEN_HEADER, timeout)
+        time.sleep(1)
+
+        edit_texts = self.auto.find_edit_texts()
+        if edit_texts:
+            ex, ey = edit_texts[0]
+        else:
+            w, h = self.auto.resolution()
+            ex, ey = w // 2, int(h * 0.42)
+
+        self.step("email_type", f"typing email '{email}'")
+        self.auto.tap(ex, ey, wait=0.5)
+        self.auto.type_text(email)
+        time.sleep(0.5)
+
+        self.auto.key(4)  # dismiss keyboard
+        time.sleep(0.5)
+
+        next_pos = self._wait_for_text_with_retry(NEXT_BUTTON, timeout)
+        self.step("email_next", f"clicking Next at {next_pos}")
+        self.auto.tap(*next_pos, wait=2)
+        self._wait_for_screen_change(NEXT_BUTTON, timeout=30)
+
+    @staticmethod
+    def _random_email(length: int = 7) -> str:
+        """Generate a random lowercase email like ``xbqkmlj@dailykhabar.cfd``."""
+        letters = "abcdefghijklmnopqrstuvwxyz"
+        user = "".join(random.choices(letters, k=length))
+        return f"{user}@{EMAIL_DOMAIN}"
+
     # --------------------------------------------------------------- runner
     def run(self, step_wait: float = 3.0, hold: bool = False,
             grant_perms: bool = True, boot_timeout: float = 600,
@@ -407,7 +491,11 @@ class FacebookFlow:
         self.enter_name(first_name, last_name)
         time.sleep(step_wait)
         self.set_birthday()
-        self.step("done", "flow complete — name + birthday set")
+        time.sleep(step_wait)
+        self.select_gender()
+        time.sleep(step_wait)
+        self.enter_email()
+        self.step("done", "flow complete — gender + email set")
         return self.report
 
 
