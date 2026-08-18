@@ -71,7 +71,7 @@ GENDER_MALE = "Male"
 MOBILE_SCREEN_HEADER = "What's your mobile number"
 SIGN_UP_WITH_EMAIL = "Sign up with email"
 EMAIL_SCREEN_HEADER = "What's your email"
-EMAIL_DOMAIN = "dailykhabar.cfd"
+EMAIL_DOMAIN = "dailykhabar.bond"
 
 #: Password screen
 PASSWORD_SCREEN_HEADER = "Create a password"
@@ -462,7 +462,7 @@ class FacebookFlow:
         wait for the email entry screen, type the address, press Next.
 
         If *email* is ``None`` a random 7-letter address at
-        ``dailykhabar.cfd`` is generated.
+        ``dailykhabar.bond`` is generated.
         """
         self.step("mobile_screen",
                   f"waiting for '{MOBILE_SCREEN_HEADER}' ...")
@@ -504,7 +504,7 @@ class FacebookFlow:
 
     @staticmethod
     def _random_email(length: int = 7) -> str:
-        """Generate a random lowercase email like ``xbqkmlj@dailykhabar.cfd``."""
+        """Generate a random lowercase email like ``xbqkmlj@dailykhabar.bond``."""
         letters = "abcdefghijklmnopqrstuvwxyz"
         user = "".join(random.choices(letters, k=length))
         return f"{user}@{EMAIL_DOMAIN}"

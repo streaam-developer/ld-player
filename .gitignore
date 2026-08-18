@@ -4,9 +4,7 @@ __pycache__/
 *.pyo
 
 # APKs / installers
-*.apk
-*.apks
-*.xapk
+
 
 # Backups created by the tool
 backups/

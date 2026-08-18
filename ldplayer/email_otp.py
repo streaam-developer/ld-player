@@ -10,7 +10,7 @@ Usage::
     code = fetch_otp(
         worker_url="https://otp-http.my-sub.workers.dev",
         api_key="k9x2m5p8q3w7",
-        email="xbqkmlj@dailykhabar.cfd",
+        email="xbqkmlj@dailykhabar.bond",
     )
     print(code)  # "12345"
 """
@@ -39,7 +39,7 @@ def fetch_otp(worker_url: str, api_key: str, email: str, *,
     api_key:
         The shared secret set as ``API_KEY`` in the Worker environment.
     email:
-        The recipient email address to look up (e.g. ``x@dailykhabar.cfd``).
+        The recipient email address to look up (e.g. ``x@dailykhabar.bond``).
     timeout:
         Maximum seconds to wait before raising :class:`OtpTimeout`.
     poll:
@@ -83,7 +83,10 @@ def _poll_once(url: str, api_key: str) -> str | None:
     """Make a single GET request.  Returns the code or ``None``."""
     req = urllib.request.Request(
         url,
-        headers={"Authorization": f"Bearer {api_key}"},
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "User-Agent": "LDPlayer-OTP-Fetcher/1.0",
+        },
         method="GET",
     )
     try:
