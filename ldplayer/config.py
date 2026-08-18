@@ -142,6 +142,8 @@ def _defaults() -> dict:
         "launch_timeout": 120,
         "boot_timeout": 180,
         "command_timeout": 300,
+        "cf_worker_url": "",
+        "cf_worker_api_key": "",
     }
 
 

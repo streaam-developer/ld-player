@@ -15,10 +15,15 @@ Flow (matches the requested sequence):
 10. tap "Sign up with email", enter random email, press Next
 11. create an advanced password, press Next, save email|password to raw.txt
 12. tap "I agree" on the terms screen, wait for processing
-13. wait for the confirmation-code screen, wait, press Next
-14. check for "confirm you're human" block → update tracker.json
+13. wait for the confirmation-code screen
+14. fetch OTP from Cloudflare Worker and enter it, tap Next
+15. check for "confirm you're human" block → update tracker.json
 
 Steps log their progress; `--hold` pauses after step 4 for manual inspection.
+
+Requires Cloudflare Worker config in ``config.json``:
+  ``cf_worker_url`` — HTTP Worker URL
+  ``cf_worker_api_key`` — shared API key
 """
 
 from __future__ import annotations
@@ -33,6 +38,7 @@ from pathlib import Path
 from .adb import Adb
 from .automation import Automator, AutomationError, Waiter
 from .console import LdConsole
+from .email_otp import fetch_otp, OtpTimeout
 from .instance import Instance
 
 LOGIN_SCREEN_BUTTON = "Create new account"
@@ -122,7 +128,8 @@ def find_facebook_apk(extra: Path | None = None) -> Path:
 
 class FacebookFlow:
     def __init__(self, console: LdConsole, adb: Adb, index: int | None = None,
-                 name: str | None = None, package: str = "com.facebook.katana"):
+                 name: str | None = None, package: str = "com.facebook.katana",
+                 cf_worker_url: str = "", cf_worker_api_key: str = ""):
         self.inst = Instance(console, adb, name=name, index=index)
         self.inst.resolve()
         self.package = package
@@ -130,6 +137,8 @@ class FacebookFlow:
         self.report: dict = {}
         self._email: str = ""
         self._password: str = ""
+        self._cf_worker_url = cf_worker_url
+        self._cf_worker_api_key = cf_worker_api_key
 
     # ---------------------------------------------------------------- steps
     def step(self, tag: str, msg: str) -> None:
@@ -596,9 +605,13 @@ class FacebookFlow:
 
     # -------------------------------------------------------- confirmation
     def wait_for_confirmation(self, timeout: float = 60,
-                              wait_seconds: float = 30) -> None:
-        """Wait for the confirmation-code screen, pause ``wait_seconds``
-        (giving time for the code to arrive), then tap Next."""
+                              otp_timeout: float = 120) -> None:
+        """Wait for the confirmation-code screen, fetch the OTP from the
+        Cloudflare Worker, enter it, then tap Next.
+
+        If no CF Worker is configured (empty URL/key), falls back to the
+        old behaviour: wait a fixed 30s then tap Next blindly.
+        """
         self.step("confirm_screen",
                   "waiting for confirmation code screen ...")
         found = False
@@ -613,13 +626,47 @@ class FacebookFlow:
             time.sleep(2)
         time.sleep(1)
 
-        self.step("confirm_wait",
-                  f"waiting {wait_seconds:.0f}s for code to arrive ...")
-        time.sleep(wait_seconds)
+        # --- Try to fetch + enter the OTP automatically ---
+        otp_entered = False
+        if self._cf_worker_url and self._cf_worker_api_key and self._email:
+            try:
+                self.step("otp_fetch",
+                          f"polling CF Worker for OTP ({self._email}) ...")
+                code = fetch_otp(
+                    self._cf_worker_url, self._cf_worker_api_key,
+                    self._email, timeout=otp_timeout)
+                self._enter_otp_code(code)
+                otp_entered = True
+            except OtpTimeout:
+                self.step("otp_timeout",
+                          "OTP not received within timeout — tapping Next anyway")
+            except Exception as exc:  # noqa: BLE001
+                self.step("otp_error", f"OTP fetch failed ({exc}) — continuing")
+        else:
+            self.step("otp_skip",
+                      "no CF Worker configured — waiting 30s then tapping Next")
+            time.sleep(30)
 
         next_pos = self._wait_for_text_with_retry(NEXT_BUTTON, timeout)
         self.step("confirm_next", f"clicking Next at {next_pos}")
         self.auto.tap(*next_pos, wait=2)
+
+    def _enter_otp_code(self, code: str) -> None:
+        """Find the OTP input field on the confirmation screen and type
+        the code."""
+        self.step("otp_enter", f"entering OTP code: {code}")
+        edit_texts = self.auto.find_edit_texts()
+        if edit_texts:
+            ox, oy = edit_texts[0]
+        else:
+            w, h = self.auto.resolution()
+            ox, oy = w // 2, int(h * 0.42)
+
+        self.auto.tap(ox, oy, wait=0.5)
+        self.auto.type_text(code)
+        time.sleep(0.5)
+        self.auto.key(4)  # dismiss keyboard
+        time.sleep(0.5)
 
     # -------------------------------------------------------- human-block check
     def check_human_block(self, timeout: float = 30) -> bool:
@@ -668,7 +715,8 @@ class FacebookFlow:
             grant_perms: bool = True, boot_timeout: float = 600,
             install_timeout: float = 840,
             apk_path: str | Path | None = None,
-            first_name: str = "Alex", last_name: str = "Johnson") -> dict:
+            first_name: str = "Alex", last_name: str = "Johnson",
+            otp_timeout: float = 120) -> dict:
         self.open_instance_and_launcher(boot_timeout)
         time.sleep(step_wait)
         self.ensure_facebook_installed(apk_path, timeout=install_timeout)
@@ -695,7 +743,7 @@ class FacebookFlow:
         time.sleep(step_wait)
         self.agree_to_terms()
         time.sleep(step_wait)
-        self.wait_for_confirmation()
+        self.wait_for_confirmation(otp_timeout=otp_timeout)
         time.sleep(step_wait)
         blocked = self.check_human_block()
         self._update_tracker(success=not blocked)
@@ -712,9 +760,13 @@ def signup_flow(console: LdConsole, adb: Adb, index: int | None = None,
                 grant_perms: bool = True, boot_timeout: float = 600,
                 install_timeout: float = 840,
                 apk_path: str | Path | None = None,
-                first_name: str = "Alex", last_name: str = "Johnson") -> dict:
-    flow = FacebookFlow(console, adb, index=index, name=name, package=package)
+                first_name: str = "Alex", last_name: str = "Johnson",
+                cf_worker_url: str = "", cf_worker_api_key: str = "",
+                otp_timeout: float = 120) -> dict:
+    flow = FacebookFlow(console, adb, index=index, name=name, package=package,
+                        cf_worker_url=cf_worker_url,
+                        cf_worker_api_key=cf_worker_api_key)
     return flow.run(step_wait=step_wait, hold=hold, grant_perms=grant_perms,
                     boot_timeout=boot_timeout, install_timeout=install_timeout,
                     apk_path=apk_path, first_name=first_name,
-                    last_name=last_name)
+                    last_name=last_name, otp_timeout=otp_timeout)

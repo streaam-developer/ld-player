@@ -15,8 +15,9 @@ Flow:
   9. tap "Sign up with email", enter random email, tap Next
   10. create password, tap Next, save email|password to raw.txt
   11. tap "I agree" on terms screen, wait
-  12. wait for confirmation code screen, wait, tap Next
+  12. fetch OTP from CF Worker, enter code, tap Next
 
+Requires cf_worker_url + cf_worker_api_key in config.json.
 Use --hold to pause after step 3 (press Enter to continue).
 """
 
@@ -62,6 +63,8 @@ def main() -> int:
                    help="first name for the new account (default: Alex)")
     p.add_argument("--last-name", default="Johnson",
                    help="last name for the new account (default: Johnson)")
+    p.add_argument("--otp-timeout", type=float, default=120,
+                   help="seconds to wait for OTP code from CF Worker")
     args = p.parse_args()
 
     console = LdConsole(find_ldconsole())
@@ -73,7 +76,10 @@ def main() -> int:
                     package=args.package, step_wait=args.step_wait,
                     hold=args.hold, grant_perms=not args.no_grant,
                     boot_timeout=args.boot_timeout, apk_path=args.apk,
-                    first_name=args.first_name, last_name=args.last_name)
+                    first_name=args.first_name, last_name=args.last_name,
+                    cf_worker_url=cfg.get("cf_worker_url", ""),
+                    cf_worker_api_key=cfg.get("cf_worker_api_key", ""),
+                    otp_timeout=args.otp_timeout)
     except Exception as exc:
         print(f"\nERROR: {exc}", flush=True)
         traceback.print_exc()
