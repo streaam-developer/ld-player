@@ -16,12 +16,14 @@ Flow (matches the requested sequence):
 11. create an advanced password, press Next, save email|password to raw.txt
 12. tap "I agree" on the terms screen, wait for processing
 13. wait for the confirmation-code screen, wait, press Next
+14. check for "confirm you're human" block → update tracker.json
 
 Steps log their progress; `--hold` pauses after step 4 for manual inspection.
 """
 
 from __future__ import annotations
 
+import json
 import random
 import string
 import time
@@ -78,8 +80,15 @@ AGREE_TEXT_FRAGMENTS = ["terms", "privacy", "policies", "agree"]
 CONFIRMATION_HEADER = "confirmation"
 CONFIRM_WAIT_SECONDS = 30
 
+#: Human verification block screen
+HUMAN_BLOCK_FRAGMENTS = ["confirm you", "confirm your", "human",
+                         "use your account", "suspicious"]
+
 #: File to save generated credentials
 CREDENTIALS_FILE = "raw.txt"
+
+#: File to track successful / failed signups
+TRACKER_FILE = "tracker.json"
 
 #: runtime permissions worth pre-granting so the dialog resolves cleanly
 SIGNUP_PERMISSIONS = [
@@ -612,6 +621,48 @@ class FacebookFlow:
         self.step("confirm_next", f"clicking Next at {next_pos}")
         self.auto.tap(*next_pos, wait=2)
 
+    # -------------------------------------------------------- human-block check
+    def check_human_block(self, timeout: float = 30) -> bool:
+        """After the confirmation Next tap, wait briefly then scan the screen
+        for Facebook's 'confirm you're human' / 'suspicious activity' block.
+
+        Returns ``True`` if the block screen was detected (account failed),
+        ``False`` if it was not found (account succeeded).
+        """
+        time.sleep(5)
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            for frag in HUMAN_BLOCK_FRAGMENTS:
+                if self.auto.find_text(frag):
+                    self.step("human_block",
+                              f"detected human-verification block ('{frag}')")
+                    return True
+            time.sleep(2)
+        self.step("human_check", "no human-block detected — account looks good")
+        return False
+
+    # -------------------------------------------------------- tracker
+    @staticmethod
+    def _update_tracker(success: bool) -> None:
+        """Increment the ``successful`` or ``failed`` counter in
+        ``tracker.json``.  Creates the file with defaults if absent."""
+        dest = Path(__file__).resolve().parent.parent / TRACKER_FILE
+        data: dict = {"successful": 0, "failed": 0}
+        if dest.exists():
+            try:
+                data = json.loads(dest.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                pass
+        if success:
+            data["successful"] = data.get("successful", 0) + 1
+        else:
+            data["failed"] = data.get("failed", 0) + 1
+        dest.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        status = "SUCCESS" if success else "FAILED"
+        print(f"  [tracker] {status} — "
+              f"successful={data['successful']} failed={data['failed']} "
+              f"({dest})", flush=True)
+
     # --------------------------------------------------------------- runner
     def run(self, step_wait: float = 3.0, hold: bool = False,
             grant_perms: bool = True, boot_timeout: float = 600,
@@ -645,7 +696,13 @@ class FacebookFlow:
         self.agree_to_terms()
         time.sleep(step_wait)
         self.wait_for_confirmation()
-        self.step("done", "flow complete — account created")
+        time.sleep(step_wait)
+        blocked = self.check_human_block()
+        self._update_tracker(success=not blocked)
+        if blocked:
+            self.step("done", "flow finished — BLOCKED by human verification")
+        else:
+            self.step("done", "flow complete — account created successfully")
         return self.report
 
 
