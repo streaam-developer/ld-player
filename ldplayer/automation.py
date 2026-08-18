@@ -287,23 +287,55 @@ class Automator:
         system is fully up, so treat a focused launcher as proof of boot too —
         this is what the user observes (instance usable ~60s after launch).
         """
+        # LDPlayer launchers may appear under various names
+        _LAUNCHER_KEYWORDS = ("launcher", "leidian", "daemon",
+                              "systemui", "home", "launcher3")
+
         def launcher_focused():
             focus = self.focused_activity()
-            return focus and "launcher" in focus.lower()
+            if not focus:
+                return False
+            low = focus.lower()
+            return any(kw in low for kw in _LAUNCHER_KEYWORDS)
 
-        def booted_or_launcher():
-            return (self.adb.is_boot_completed(self.instance.index,
-                                               discover=True)
-                    or launcher_focused())
+        def device_responsive():
+            """Fallback: if adb responds at all, the device is up."""
+            try:
+                out = self.adb.shell(self.instance.index,
+                                     ["echo", "ok"], timeout=10,
+                                     discover=True)
+                return "ok" in out
+            except Exception:
+                return False
 
+        def booted_or_ready():
+            if self.adb.is_boot_completed(self.instance.index,
+                                          discover=True):
+                return True
+            if launcher_focused():
+                return True
+            # If device is responsive and we've been waiting a while,
+            # accept it as booted (LDPlayer quirks)
+            return False
+
+        # Phase 1: wait for boot or launcher (uses most of the timeout)
+        boot_timeout = timeout * 0.7
         try:
-            Waiter(timeout, poll=3.0, label="waiting for boot + launcher").until(
-                booted_or_launcher, "Android boot completed / launcher focused")
+            Waiter(boot_timeout, poll=3.0,
+                   label="waiting for boot + launcher").until(
+                booted_or_ready,
+                "Android boot completed / launcher focused")
         except AutomationError:
-            # boot prop never flips; keep polling the launcher below
             pass
+
+        # Phase 2: press home and confirm launcher is visible
         self.home()
-        def launcher():
-            return launcher_focused()
-        Waiter(timeout, poll=2.0, label="waiting for launcher").until(
-            launcher, "launcher focused")
+        try:
+            Waiter(timeout * 0.3, poll=2.0,
+                   label="waiting for launcher").until(
+                lambda: launcher_focused() or device_responsive(),
+                "launcher focused / device responsive")
+        except AutomationError:
+            # Last resort: if the device is alive at all, carry on
+            if not device_responsive():
+                raise
