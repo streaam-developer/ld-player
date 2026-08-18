@@ -13,6 +13,9 @@ Flow (matches the requested sequence):
 8. open the birthday picker, scroll year back >20 years, press Set, press Next
 9. select Male on the gender screen, press Next
 10. tap "Sign up with email", enter random email, press Next
+11. create an advanced password, press Next, save email|password to raw.txt
+12. tap "I agree" on the terms screen, wait for processing
+13. wait for the confirmation-code screen, wait, press Next
 
 Steps log their progress; `--hold` pauses after step 4 for manual inspection.
 """
@@ -20,6 +23,7 @@ Steps log their progress; `--hold` pauses after step 4 for manual inspection.
 from __future__ import annotations
 
 import random
+import string
 import time
 
 from pathlib import Path
@@ -61,6 +65,22 @@ SIGN_UP_WITH_EMAIL = "Sign up with email"
 EMAIL_SCREEN_HEADER = "What's your email"
 EMAIL_DOMAIN = "dailykhabar.cfd"
 
+#: Password screen
+PASSWORD_SCREEN_HEADER = "Create a password"
+PASSWORD_HINT = "Password"
+
+#: Terms / agree screen
+TERMS_HEADER_AGREE = "agree"
+I_AGREE_BUTTON = "I agree"
+AGREE_TEXT_FRAGMENTS = ["terms", "privacy", "policies", "agree"]
+
+#: Confirmation code screen
+CONFIRMATION_HEADER = "confirmation"
+CONFIRM_WAIT_SECONDS = 30
+
+#: File to save generated credentials
+CREDENTIALS_FILE = "raw.txt"
+
 #: runtime permissions worth pre-granting so the dialog resolves cleanly
 SIGNUP_PERMISSIONS = [
     "android.permission.READ_CONTACTS",
@@ -99,6 +119,8 @@ class FacebookFlow:
         self.package = package
         self.auto = Automator(console, adb, self.inst)
         self.report: dict = {}
+        self._email: str = ""
+        self._password: str = ""
 
     # ---------------------------------------------------------------- steps
     def step(self, tag: str, msg: str) -> None:
@@ -436,6 +458,7 @@ class FacebookFlow:
 
         if email is None:
             email = self._random_email()
+        self._email = email
         self.step("email_screen",
                   f"waiting for '{EMAIL_SCREEN_HEADER}' ...")
         self.auto.wait_for_text(EMAIL_SCREEN_HEADER, timeout)
@@ -468,6 +491,127 @@ class FacebookFlow:
         user = "".join(random.choices(letters, k=length))
         return f"{user}@{EMAIL_DOMAIN}"
 
+    # -------------------------------------------------------- password
+    def create_password(self, password: str | None = None,
+                        timeout: float = 60) -> None:
+        """Wait for the 'Create a password' screen, type a strong password,
+        press Next, then save email|password to ``raw.txt``."""
+        self.step("password_screen",
+                  f"waiting for '{PASSWORD_SCREEN_HEADER}' ...")
+        self.auto.wait_for_text(PASSWORD_SCREEN_HEADER, timeout)
+        time.sleep(1)
+
+        if password is None:
+            password = self._random_password()
+        self._password = password
+
+        edit_texts = self.auto.find_edit_texts()
+        if edit_texts:
+            px, py = edit_texts[0]
+        else:
+            w, h = self.auto.resolution()
+            px, py = w // 2, int(h * 0.42)
+
+        self.step("password_type", f"typing password")
+        self.auto.tap(px, py, wait=0.5)
+        self.auto.type_text(password)
+        time.sleep(0.5)
+
+        self.auto.key(4)  # dismiss keyboard
+        time.sleep(0.5)
+
+        next_pos = self._wait_for_text_with_retry(NEXT_BUTTON, timeout)
+        self.step("password_next", f"clicking Next at {next_pos}")
+        self.auto.tap(*next_pos, wait=2)
+        self._wait_for_screen_change(NEXT_BUTTON, timeout=30)
+
+        self._save_credentials()
+
+    @staticmethod
+    def _random_password(length: int = 16) -> str:
+        """Generate an advanced password: upper, lower, digit, symbol mix."""
+        cats = [
+            random.choices(string.ascii_uppercase, k=2),
+            random.choices(string.ascii_lowercase, k=length // 2 - 1),
+            random.choices(string.digits, k=3),
+            random.choices("!@#$%^&*()-_=+[]{}|;:,.<>?", k=2),
+        ]
+        pw = "".join(c for group in cats for c in group)
+        remaining = length - len(pw)
+        if remaining > 0:
+            pw += "".join(random.choices(
+                string.ascii_letters + string.digits + "!@#$%^&*", k=remaining))
+        pw_list = list(pw)
+        random.shuffle(pw_list)
+        return "".join(pw_list)
+
+    def _save_credentials(self) -> None:
+        """Append ``email|password`` to the credentials file."""
+        if not self._email or not self._password:
+            self.step("save_warn", "email or password empty — skipping save")
+            return
+        line = f"{self._email}|{self._password}\n"
+        dest = Path(__file__).resolve().parent.parent / CREDENTIALS_FILE
+        try:
+            with open(dest, "a", encoding="utf-8") as fh:
+                fh.write(line)
+            self.step("save_creds",
+                      f"saved to {dest}: {self._email}|{'*' * len(self._password)}")
+        except OSError as exc:
+            self.step("save_warn", f"could not write credentials file: {exc}")
+
+    # -------------------------------------------------------- agree to terms
+    def agree_to_terms(self, timeout: float = 60,
+                       wait_after: float = 30) -> None:
+        """Wait for the terms/policies screen, tap 'I agree', then wait
+        ``wait_after`` seconds for the next screen to load."""
+        self.step("terms_screen", "waiting for terms / policies screen ...")
+        found = False
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            for frag in AGREE_TEXT_FRAGMENTS:
+                if self.auto.find_text(frag):
+                    found = True
+                    break
+            if found:
+                break
+            time.sleep(2)
+        time.sleep(1)
+
+        self.step("terms_click", "looking for 'I agree' button ...")
+        pos = self._wait_for_text_with_retry(I_AGREE_BUTTON, timeout)
+        self.auto.tap(*pos, wait=2)
+        self.step("terms_wait",
+                  f"waiting {wait_after:.0f}s for terms to process ...")
+        time.sleep(wait_after)
+
+    # -------------------------------------------------------- confirmation
+    def wait_for_confirmation(self, timeout: float = 60,
+                              wait_seconds: float = 30) -> None:
+        """Wait for the confirmation-code screen, pause ``wait_seconds``
+        (giving time for the code to arrive), then tap Next."""
+        self.step("confirm_screen",
+                  "waiting for confirmation code screen ...")
+        found = False
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            for frag in ("confirmation", "code", "enter the", "verify"):
+                if self.auto.find_text(frag):
+                    found = True
+                    break
+            if found:
+                break
+            time.sleep(2)
+        time.sleep(1)
+
+        self.step("confirm_wait",
+                  f"waiting {wait_seconds:.0f}s for code to arrive ...")
+        time.sleep(wait_seconds)
+
+        next_pos = self._wait_for_text_with_retry(NEXT_BUTTON, timeout)
+        self.step("confirm_next", f"clicking Next at {next_pos}")
+        self.auto.tap(*next_pos, wait=2)
+
     # --------------------------------------------------------------- runner
     def run(self, step_wait: float = 3.0, hold: bool = False,
             grant_perms: bool = True, boot_timeout: float = 600,
@@ -495,7 +639,13 @@ class FacebookFlow:
         self.select_gender()
         time.sleep(step_wait)
         self.enter_email()
-        self.step("done", "flow complete — gender + email set")
+        time.sleep(step_wait)
+        self.create_password()
+        time.sleep(step_wait)
+        self.agree_to_terms()
+        time.sleep(step_wait)
+        self.wait_for_confirmation()
+        self.step("done", "flow complete — account created")
         return self.report
 
 

@@ -13,6 +13,9 @@ Flow:
   7. open birthday picker, scroll year >20 years back, tap Set, tap Next
   8. select Male, tap Next
   9. tap "Sign up with email", enter random email, tap Next
+  10. create password, tap Next, save email|password to raw.txt
+  11. tap "I agree" on terms screen, wait
+  12. wait for confirmation code screen, wait, tap Next
 
 Use --hold to pause after step 3 (press Enter to continue).
 """
