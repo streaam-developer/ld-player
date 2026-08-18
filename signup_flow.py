@@ -1,6 +1,7 @@
 """Facebook signup automation — run directly from the command line.
 
     python signup_flow.py [--index N | --name NAME] [--hold]
+        [--first-name FN] [--last-name LN]
 
 Flow:
   1. open the instance, wait until the apps grid (launcher) is showing
@@ -8,6 +9,8 @@ Flow:
   3. wait for "Create new account", tap it, wait there
   4. tap "Create new account" again on the form
   5. wait for the Contacts permission prompt and tap "Allow"
+  6. enter first/last name, tap Next
+  7. open birthday picker, scroll year >20 years back, tap Set, tap Next
 
 Use --hold to pause after step 3 (press Enter to continue).
 """
@@ -50,6 +53,10 @@ def main() -> int:
                    help="skip pre-granting contacts/location permissions")
     p.add_argument("--boot-timeout", type=int, default=600,
                    help="seconds to wait for boot + launcher")
+    p.add_argument("--first-name", default="Alex",
+                   help="first name for the new account (default: Alex)")
+    p.add_argument("--last-name", default="Johnson",
+                   help="last name for the new account (default: Johnson)")
     args = p.parse_args()
 
     console = LdConsole(find_ldconsole())
@@ -60,7 +67,8 @@ def main() -> int:
         signup_flow(console, adb, index=args.index, name=args.name,
                     package=args.package, step_wait=args.step_wait,
                     hold=args.hold, grant_perms=not args.no_grant,
-                    boot_timeout=args.boot_timeout, apk_path=args.apk)
+                    boot_timeout=args.boot_timeout, apk_path=args.apk,
+                    first_name=args.first_name, last_name=args.last_name)
     except Exception as exc:
         print(f"\nERROR: {exc}", flush=True)
         traceback.print_exc()

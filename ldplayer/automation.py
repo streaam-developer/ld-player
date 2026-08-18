@@ -18,6 +18,14 @@ from .instance import Instance
 _NODE_RE = re.compile(r"<node\b[^>]*/>")
 
 
+def _parse_node_attrs(node_xml: str) -> dict[str, str]:
+    """Extract all attributes from a single <node …/> XML fragment."""
+    attrs: dict[str, str] = {}
+    for m in re.finditer(r'(\w[\w-]*)="([^"]*)"', node_xml):
+        attrs[m.group(1)] = m.group(2)
+    return attrs
+
+
 class AutomationError(RuntimeError):
     pass
 
@@ -150,6 +158,86 @@ class Automator:
                 cy = (int(b.group(2)) + int(b.group(4))) // 2
                 found.append((t.group(1), cx, cy))
         return found
+
+    def _all_nodes(self, xml: str) -> list[dict]:
+        """Return parsed attribute dicts for every <node> in the UI XML."""
+        nodes = []
+        for m in _NODE_RE.finditer(xml):
+            attrs = _parse_node_attrs(m.group(0))
+            if "bounds" in attrs:
+                nodes.append(attrs)
+        return nodes
+
+    def _bounds_center(self, bounds_str: str) -> tuple[int, int] | None:
+        """Parse '[x1,y1][x2,y2]' and return the center (cx, cy)."""
+        b = re.match(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]', bounds_str)
+        if not b:
+            return None
+        return ((int(b.group(1)) + int(b.group(3))) // 2,
+                (int(b.group(2)) + int(b.group(4))) // 2)
+
+    def find_edit_texts(self) -> list[tuple[int, int]]:
+        """Return center coordinates of every EditText on screen."""
+        try:
+            xml = self.dump_ui()
+        except Exception:
+            return []
+        centers = []
+        for node in self._all_nodes(xml):
+            cls = node.get("class", "")
+            if "EditText" in cls:
+                center = self._bounds_center(node.get("bounds", ""))
+                if center:
+                    centers.append(center)
+        return centers
+
+    def find_by_class(self, class_fragment: str) -> list[dict]:
+        """Return attribute dicts for all nodes whose class contains the fragment."""
+        try:
+            xml = self.dump_ui()
+        except Exception:
+            return []
+        low = class_fragment.lower()
+        return [n for n in self._all_nodes(xml) if low in n.get("class", "").lower()]
+
+    def find_by_resource_id(self, resource_id: str) -> tuple[int, int] | None:
+        """Find a node by its resource-id and return its center."""
+        try:
+            xml = self.dump_ui()
+        except Exception:
+            return None
+        for node in self._all_nodes(xml):
+            if node.get("resource-id", "") == resource_id:
+                return self._bounds_center(node.get("bounds", ""))
+        return None
+
+    def find_by_content_desc(self, desc: str) -> tuple[int, int] | None:
+        """Find a node by its content-desc and return its center."""
+        try:
+            xml = self.dump_ui()
+        except Exception:
+            return None
+        low = desc.lower()
+        for node in self._all_nodes(xml):
+            if low in node.get("content-desc", "").lower():
+                return self._bounds_center(node.get("bounds", ""))
+        return None
+
+    def scroll_down(self, fraction: float = 0.4, duration_ms: int = 600) -> None:
+        """Scroll from bottom-third to top-third of screen."""
+        w, h = self.resolution()
+        cx = w // 2
+        y_start = int(h * 0.7)
+        y_end = int(h * 0.3)
+        self.swipe(cx, y_start, cx, y_end, duration_ms=duration_ms, wait=1.0)
+
+    def scroll_up(self, fraction: float = 0.4, duration_ms: int = 600) -> None:
+        """Scroll from top-third to bottom-third of screen."""
+        w, h = self.resolution()
+        cx = w // 2
+        y_start = int(h * 0.3)
+        y_end = int(h * 0.7)
+        self.swipe(cx, y_start, cx, y_end, duration_ms=duration_ms, wait=1.0)
 
     def find_text(self, text: str) -> tuple[int, int] | None:
         """Find the center of a UI node whose text contains `text`."""

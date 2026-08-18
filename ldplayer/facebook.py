@@ -9,12 +9,15 @@ Flow (matches the requested sequence):
 4. wait until "Create new account" appears on the login screen, tap it, wait
 5. on the create-account form, tap "Create new account" again
 6. wait for the permission prompt (e.g. Contacts) and tap "Allow"
+7. enter first/last name and press Next
+8. open the birthday picker, scroll year back >20 years, press Set, press Next
 
 Steps log their progress; `--hold` pauses after step 4 for manual inspection.
 """
 
 from __future__ import annotations
 
+import random
 import time
 
 from pathlib import Path
@@ -34,6 +37,17 @@ LOADING_INDICATORS = ["loading", "connecting", "Logging in", "Signing in"]
 #: Common popups/interstitials Facebook shows after first launch
 SKIP_POPUP_TEXTS = ["Not now", "Skip", "Turn off", "Cancel", "Maybe later",
                    "No thanks", "Use Facebook without an account"]
+
+#: Name-entry screen
+NAME_SCREEN_HEADER = "What's your name"
+FIRST_NAME_HINT = "First name"
+LAST_NAME_HINT = "Last name"
+NEXT_BUTTON = "Next"
+
+#: Birthday screen
+BIRTHDAY_SCREEN_HEADER = "What's your birthday"
+SET_BUTTON = "Set"
+DATE_PICKER_DONE = "Set"
 
 #: runtime permissions worth pre-granting so the dialog resolves cleanly
 SIGNUP_PERMISSIONS = [
@@ -258,11 +272,124 @@ class FacebookFlow:
             self.step("permission_wait", "no permission dialog detected within timeout")
         return handled_any
 
+    # -------------------------------------------------------- name entry
+    def enter_name(self, first_name: str, last_name: str,
+                   timeout: float = 60) -> None:
+        """Wait for the 'What's your name?' screen, tap the first-name
+        field, type, then tap the last-name field, type, and press Next."""
+        self.step("name_screen", f"waiting for '{NAME_SCREEN_HEADER}' ...")
+        self.auto.wait_for_text(NAME_SCREEN_HEADER, timeout)
+        time.sleep(1)
+
+        edit_texts = self.auto.find_edit_texts()
+        if len(edit_texts) >= 2:
+            first_x, first_y = edit_texts[0]
+            last_x, last_y = edit_texts[1]
+        elif len(edit_texts) == 1:
+            first_x, first_y = edit_texts[0]
+            w, h = self.auto.resolution()
+            last_x, last_y = first_x, first_y + int(h * 0.08)
+        else:
+            w, h = self.auto.resolution()
+            first_x, first_y = w // 2, int(h * 0.38)
+            last_x, last_y = w // 2, int(h * 0.48)
+
+        self.step("name_type", f"typing first name '{first_name}'")
+        self.auto.tap(first_x, first_y, wait=0.5)
+        self.auto.type_text(first_name)
+        time.sleep(0.5)
+
+        self.step("name_type", f"typing last name '{last_name}'")
+        self.auto.tap(last_x, last_y, wait=0.5)
+        self.auto.type_text(last_name)
+        time.sleep(0.5)
+
+        self.auto.key(4)  # dismiss keyboard
+        time.sleep(0.5)
+
+        next_pos = self._wait_for_text_with_retry(NEXT_BUTTON, timeout)
+        self.step("name_next", f"clicking Next at {next_pos}")
+        self.auto.tap(*next_pos, wait=2)
+        self._wait_for_screen_change(NEXT_BUTTON, timeout=30)
+
+    # -------------------------------------------------------- birthday
+    def set_birthday(self, timeout: float = 60,
+                     min_age_years: int = 21) -> None:
+        """Wait for the birthday screen, open the date picker, scroll the
+        year wheel to set a date at least ``min_age_years`` in the past,
+        click 'Set', then click 'Next'."""
+        self.step("birthday_screen",
+                  f"waiting for '{BIRTHDAY_SCREEN_HEADER}' ...")
+        self.auto.wait_for_text(BIRTHDAY_SCREEN_HEADER, timeout)
+        time.sleep(1)
+
+        self.step("birthday_picker", "opening date picker ...")
+        w, h = self.auto.resolution()
+        picker_trigger = self.auto.find_text("Enter your birthday")
+        if not picker_trigger:
+            picker_trigger = self.auto.find_text("Birthday")
+        if picker_trigger:
+            self.auto.tap(*picker_trigger, wait=1.5)
+        else:
+            self.auto.tap(w // 2, int(h * 0.45), wait=1.5)
+
+        self._scroll_date_picker_to_old_date(min_age_years)
+
+        set_pos = self._wait_for_text_with_retry(SET_BUTTON, timeout=15)
+        self.step("birthday_set", f"clicking Set at {set_pos}")
+        self.auto.tap(*set_pos, wait=2)
+        self._wait_for_screen_change(SET_BUTTON, timeout=15)
+
+        time.sleep(1)
+        next_pos = self._wait_for_text_with_retry(NEXT_BUTTON, timeout=timeout)
+        self.step("birthday_next", f"clicking Next at {next_pos}")
+        self.auto.tap(*next_pos, wait=2)
+        self._wait_for_screen_change(NEXT_BUTTON, timeout=30)
+
+    def _scroll_date_picker_to_old_date(self, min_age_years: int = 21) -> None:
+        """Scroll the year column of the Android date picker backwards so
+        the selected year is at least ``min_age_years`` in the past.
+
+        The Android DatePicker uses a vertical number-picker for each of
+        month / day / year.  We locate the year wheel by looking for the
+        current 4-digit year on screen, then we swipe it upward (which
+        decrements the value) enough times.
+        """
+        year_text = str(time.localtime().tm_year)
+        year_pos = self.auto.find_text(year_text)
+        if not year_pos:
+            self.step("birthday_warn",
+                      "could not locate year on date picker — trying blind scroll")
+            w, h = self.auto.resolution()
+            year_pos = (w // 2, h // 2)
+
+        year_x, year_y = year_pos
+
+        scrolls_needed = min_age_years + 1
+        self.step("birthday_scroll",
+                  f"scrolling year wheel back ~{scrolls_needed} years "
+                  f"(from {time.localtime().tm_year} to "
+                  f"{time.localtime().tm_year - scrolls_needed})")
+
+        w, h = self.auto.resolution()
+        swipe_top = int(h * 0.35)
+        swipe_bot = int(h * 0.65)
+
+        for i in range(scrolls_needed):
+            self.auto.swipe(year_x, swipe_top, year_x, swipe_bot,
+                            duration_ms=300, wait=0.3)
+            if (i + 1) % 5 == 0:
+                self.step("birthday_scroll_progress",
+                          f"  scrolled {i + 1}/{scrolls_needed} years")
+
+        time.sleep(1)
+
     # --------------------------------------------------------------- runner
     def run(self, step_wait: float = 3.0, hold: bool = False,
             grant_perms: bool = True, boot_timeout: float = 600,
             install_timeout: float = 840,
-            apk_path: str | Path | None = None) -> dict:
+            apk_path: str | Path | None = None,
+            first_name: str = "Alex", last_name: str = "Johnson") -> dict:
         self.open_instance_and_launcher(boot_timeout)
         time.sleep(step_wait)
         self.ensure_facebook_installed(apk_path, timeout=install_timeout)
@@ -276,7 +403,11 @@ class FacebookFlow:
         self.submit_create_form()
         time.sleep(step_wait)
         self.allow_permission()
-        self.step("done", "flow complete — permission allowed")
+        time.sleep(step_wait)
+        self.enter_name(first_name, last_name)
+        time.sleep(step_wait)
+        self.set_birthday()
+        self.step("done", "flow complete — name + birthday set")
         return self.report
 
 
@@ -285,8 +416,10 @@ def signup_flow(console: LdConsole, adb: Adb, index: int | None = None,
                 step_wait: float = 3.0, hold: bool = False,
                 grant_perms: bool = True, boot_timeout: float = 600,
                 install_timeout: float = 840,
-                apk_path: str | Path | None = None) -> dict:
+                apk_path: str | Path | None = None,
+                first_name: str = "Alex", last_name: str = "Johnson") -> dict:
     flow = FacebookFlow(console, adb, index=index, name=name, package=package)
     return flow.run(step_wait=step_wait, hold=hold, grant_perms=grant_perms,
                     boot_timeout=boot_timeout, install_timeout=install_timeout,
-                    apk_path=apk_path)
+                    apk_path=apk_path, first_name=first_name,
+                    last_name=last_name)
