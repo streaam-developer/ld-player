@@ -14,6 +14,8 @@ CONFIG_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "ldplayer-cli"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 
 LDPLAYER_COMMON_DIRS = [
+    
+    "C:\\leidian\\LDPlayer9",
     "C:\\LDPlayer\\LDPlayer9",
     "D:\\LDPlayer\\LDPlayer9",
     "E:\\LDPlayer\\LDPlayer9",
