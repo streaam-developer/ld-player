@@ -309,13 +309,14 @@ class Automator:
                 return False
 
         def booted_or_ready():
-            if self.adb.is_boot_completed(self.instance.index,
-                                          discover=True):
+            # Fast check first — if adb responds, device is alive
+            if device_responsive():
                 return True
             if launcher_focused():
                 return True
-            # If device is responsive and we've been waiting a while,
-            # accept it as booted (LDPlayer quirks)
+            if self.adb.is_boot_completed(self.instance.index,
+                                          discover=True):
+                return True
             return False
 
         # Phase 1: wait for boot or launcher (uses most of the timeout)
