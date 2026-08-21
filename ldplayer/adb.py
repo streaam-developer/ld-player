@@ -48,15 +48,19 @@ class Adb:
         return f"{self.host}:{port}"
 
     def _looks_like_ldplayer(self, serial: str) -> bool:
+        """True if ``serial`` is a usable Android device.
+
+        LDPlayer images report all kinds of manufacturers ("Google Phone",
+        "samsung", sometimes empty), so name-based filtering misfires both
+        ways.  Instead we simply require the device to answer a shell
+        command — emulator console ports (5554, 5556, ...) accept TCP but
+        fail here, which is exactly what we want to reject.
+        """
         try:
-            out = self._run(
-                ["-s", serial, "shell", "getprop", "ro.product.manufacturer"],
-                timeout=15,
-            )
-            return "ld" in out.strip().lower() or "china" in out.strip().lower()
+            out = self._run(["-s", serial, "shell", "echo", "ok"], timeout=15)
+            return "ok" in out
         except AdbError:
-            # Some LDPlayer images return empty; accept any alive device.
-            return True
+            return False
 
     def discover(self, index: int) -> str:
         """Return a working serial for the instance, caching the result."""
@@ -68,15 +72,20 @@ class Adb:
             except AdbError:
                 self._ports[index] = None
 
-        # already-connected emulator serials take priority
-        serials = self._devices()
-        if serials:
-            for serial in serials:
-                if self._looks_like_ldplayer(serial):
-                    self._ports[index] = serial
-                    return serial
+        # the conventional per-index port first, so several running
+        # instances never get cross-wired to each other's screens
+        primary = self.endpoint(index)
+        try:
+            self._run(["connect", primary], timeout=15)
+            if self._looks_like_ldplayer(primary):
+                self._ports[index] = primary
+                return primary
+        except AdbError:
+            pass
 
         for port in self._candidate_ports(index):
+            if port == self.port_for(index):
+                continue
             serial = self._serial_for_port(port)
             try:
                 self._run(["connect", serial], timeout=15)
@@ -85,6 +94,14 @@ class Adb:
             if self._looks_like_ldplayer(serial):
                 self._ports[index] = serial
                 return serial
+
+        # last resort: any already-connected device
+        serials = self._devices()
+        if serials:
+            for serial in serials:
+                if self._looks_like_ldplayer(serial):
+                    self._ports[index] = serial
+                    return serial
 
         raise AdbError(f"no adb device found for LDPlayer instance index {index}")
 
