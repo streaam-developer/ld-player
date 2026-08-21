@@ -15,7 +15,16 @@ from .adb import Adb
 from .console import LdConsole
 from .instance import Instance
 
-_NODE_RE = re.compile(r"<node\b[^>]*/>")
+_NODE_RE = re.compile(r"<node\b[^>]*>")
+
+#: Where the UI hierarchy is staged on the device. /dev/tty is NOT usable on
+#: LDPlayer builds — ``uiautomator dump /dev/tty`` exits 0 but the XML never
+#: reaches stdout, so the dump must go to a file and be read back.
+_UI_DUMP_PATH = "/sdcard/ldcli_ui.xml"
+
+#: How long a dumped hierarchy stays fresh. Text lookups scan several labels
+#: back-to-back; without this each lookup paid for its own slow dump.
+_UI_CACHE_TTL = 1.2
 
 
 def _parse_node_attrs(node_xml: str) -> dict[str, str]:
@@ -66,6 +75,10 @@ class Automator:
         self.console = console
         self.adb = adb
         self.instance = instance
+        self._ui_cache: tuple[float, str] | None = None
+
+    def _invalidate_ui(self) -> None:
+        self._ui_cache = None
 
     # ------------------------------------------------------------ screen info
     def resolution(self) -> tuple[int, int]:
@@ -80,6 +93,7 @@ class Automator:
 
     # --------------------------------------------------------------- actions
     def tap(self, x: int, y: int, wait: float = 0.5) -> None:
+        self._invalidate_ui()
         self.adb.input_tap(self.instance.index, x, y)
         time.sleep(wait)
 
@@ -89,13 +103,16 @@ class Automator:
 
     def swipe(self, x1: int, y1: int, x2: int, y2: int,
               duration_ms: int = 200, wait: float = 0.5) -> None:
+        self._invalidate_ui()
         self.adb.input_swipe(self.instance.index, x1, y1, x2, y2, duration_ms)
         time.sleep(wait)
 
     def type_text(self, text: str) -> None:
+        self._invalidate_ui()
         self.adb.input_text(self.instance.index, text)
 
     def key(self, keycode: int) -> None:
+        self._invalidate_ui()
         self.adb.keyevent(self.instance.index, keycode)
 
     def home(self) -> None:
@@ -132,31 +149,67 @@ class Automator:
             pred, f"focus containing '{activity_fragment}'")
 
     # ------------------------------------------------------- UI-tree / text
-    def dump_ui(self) -> str:
-        """Return the current UI hierarchy XML (uiautomator dump)."""
-        try:
-            return self.adb.shell(self.instance.index,
-                                  ["uiautomator", "dump", "/dev/tty"],
-                                  timeout=30, discover=True)
-        except Exception:
-            self.adb.shell(self.instance.index,
-                           ["uiautomator", "dump", "/sdcard/ldcli_ui.xml"],
-                           timeout=30, discover=True)
-            return self.adb.shell(self.instance.index,
-                                  ["cat", "/sdcard/ldcli_ui.xml"],
-                                  timeout=30, discover=True)
+    def dump_ui(self, retries: int = 3, use_cache: bool = True) -> str:
+        """Return the current UI hierarchy XML (uiautomator dump).
 
-    def _text_nodes(self, xml: str) -> list[tuple[str, int, int]]:
-        """Yield (text, cx, cy) for every UI node with text + bounds."""
+        The hierarchy is dumped to a file on the device and read back with
+        ``exec-out cat`` (binary-safe). The destination is removed first so
+        a failed dump can never serve the previous screen's XML, every
+        result is validated to actually contain nodes, and transient
+        failures ("could not get idle state" during animations) are retried.
+        """
+        now = time.time()
+        if use_cache and self._ui_cache and now - self._ui_cache[0] < _UI_CACHE_TTL:
+            return self._ui_cache[1]
+
+        idx = self.instance.index
+        last_err = ""
+        for _ in range(retries):
+            try:
+                self.adb.shell(idx, ["rm", "-f", _UI_DUMP_PATH],
+                               timeout=15, discover=True)
+                out = self.adb.shell(idx, ["uiautomator", "dump", _UI_DUMP_PATH],
+                                     timeout=45, discover=True)
+                raw = self.adb.exec_out(idx, ["cat", _UI_DUMP_PATH], timeout=30)
+                xml = raw.decode("utf-8", errors="replace")
+                if "<node" in xml:
+                    self._ui_cache = (time.time(), xml)
+                    return xml
+                last_err = (out.strip() or xml.strip()
+                            or "dump produced no nodes")
+            except Exception as exc:  # noqa: BLE001
+                last_err = str(exc)
+            time.sleep(1.5)
+        raise AutomationError(
+            f"uiautomator dump failed after {retries} attempts ({last_err})")
+
+    def _text_nodes(self, xml: str) -> list[tuple[str, int, int, bool]]:
+        """Yield (label, cx, cy, clickable) for every UI node carrying text.
+
+        The label comes from ``text`` or, failing that, ``content-desc`` —
+        Facebook's Bloks screens often expose labels only through
+        content-desc. Every node tag is considered (container nodes too,
+        not just self-closing leaves).
+        """
         found = []
         for m in _NODE_RE.finditer(xml):
             node = m.group(0)
-            t = re.search(r'text="([^"]*)"', node)
             b = re.search(r'bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', node)
-            if t and b and t.group(1).strip():
-                cx = (int(b.group(1)) + int(b.group(3))) // 2
-                cy = (int(b.group(2)) + int(b.group(4))) // 2
-                found.append((t.group(1), cx, cy))
+            if not b:
+                continue
+            t = re.search(r'\btext="([^"]*)"', node)
+            d = re.search(r'\bcontent-desc="([^"]*)"', node)
+            label = ""
+            if t and t.group(1).strip():
+                label = t.group(1)
+            elif d and d.group(1).strip():
+                label = d.group(1)
+            if not label:
+                continue
+            cx = (int(b.group(1)) + int(b.group(3))) // 2
+            cy = (int(b.group(2)) + int(b.group(4))) // 2
+            clickable = 'clickable="true"' in node
+            found.append((label, cx, cy, clickable))
         return found
 
     def _all_nodes(self, xml: str) -> list[dict]:
@@ -240,16 +293,20 @@ class Automator:
         self.swipe(cx, y_start, cx, y_end, duration_ms=duration_ms, wait=1.0)
 
     def find_text(self, text: str) -> tuple[int, int] | None:
-        """Find the center of a UI node whose text contains `text`."""
+        """Find the center of a UI node whose text (or content-desc)
+        contains `text`. Clickable matches win over plain labels."""
         try:
             xml = self.dump_ui()
         except Exception:
             return None
         low = text.lower()
-        for label, cx, cy in self._text_nodes(xml):
+        fallback: tuple[int, int] | None = None
+        for label, cx, cy, clickable in self._text_nodes(xml):
             if low in label.lower():
-                return cx, cy
-        return None
+                if clickable:
+                    return cx, cy
+                fallback = fallback or (cx, cy)
+        return fallback
 
     def wait_for_text(self, text: str, timeout: float = 120,
                       click: bool = False) -> tuple[int, int]:
