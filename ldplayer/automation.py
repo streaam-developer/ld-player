@@ -49,13 +49,19 @@ class Waiter:
         self.label = label
 
     def until(self, predicate, description: str = "condition"):
+        """Poll until ``predicate()`` returns something truthy.
+
+        Returns the predicate's value (not just ``True``) so callers can
+        retrieve e.g. a found position or a matched label.
+        """
         start = time.time()
         deadline = start + self.timeout
         last_tick = 0.0
         while time.time() < deadline:
             try:
-                if predicate():
-                    return True
+                result = predicate()
+                if result:
+                    return result
             except Exception:
                 pass
             now = time.time()
