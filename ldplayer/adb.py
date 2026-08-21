@@ -63,20 +63,45 @@ class Adb:
             return False
 
     def discover(self, index: int) -> str:
-        """Return a working serial for the instance, caching the result."""
+        """Return a working serial for the instance, caching the result.
+
+        Order (all cheap checks first, so a half-open port can't stall
+        discovery for minutes):
+          1. cached serial (verify + drop stale transports explicitly)
+          2. the auto-detected console serial expected for this index
+             (``emulator-5554`` for index 0, ``emulator-5556`` for index 1…)
+          3. a fresh ``adb connect`` to the conventional TCP endpoint
+          4. nearby candidate ports — only after a sub-second TCP probe
+             says something is actually listening there
+          5. any already-connected device (last resort)
+        """
         cached = self._ports.get(index)
         if cached:
             try:
-                self._run(["-s", cached, "shell", "echo", "ok"], timeout=15)
+                self._run(["-s", cached, "shell", "echo", "ok"], timeout=10)
                 return cached
             except AdbError:
+                # clear the stale transport so it can't wedge later connects
+                try:
+                    self._run(["disconnect", cached], timeout=10)
+                except AdbError:
+                    pass
                 self._ports[index] = None
 
-        # the conventional per-index port first, so several running
+        devices = self._devices()
+
+        # LDPlayer instances register with adb like stock emulators:
+        # index i -> console port 5554+2i -> serial "emulator-<port>"
+        expected_console = f"emulator-{self.port_for(index) - 1}"
+        if expected_console in devices and self._looks_like_ldplayer(expected_console):
+            self._ports[index] = expected_console
+            return expected_console
+
+        # the conventional per-index port next, so several running
         # instances never get cross-wired to each other's screens
         primary = self.endpoint(index)
         try:
-            self._run(["connect", primary], timeout=15)
+            self._run(["connect", primary], timeout=8)
             if self._looks_like_ldplayer(primary):
                 self._ports[index] = primary
                 return primary
@@ -86,9 +111,11 @@ class Adb:
         for port in self._candidate_ports(index):
             if port == self.port_for(index):
                 continue
+            if not self._port_listening(port):
+                continue
             serial = self._serial_for_port(port)
             try:
-                self._run(["connect", serial], timeout=15)
+                self._run(["connect", serial], timeout=8)
             except AdbError:
                 continue
             if self._looks_like_ldplayer(serial):
@@ -96,14 +123,21 @@ class Adb:
                 return serial
 
         # last resort: any already-connected device
-        serials = self._devices()
-        if serials:
-            for serial in serials:
-                if self._looks_like_ldplayer(serial):
-                    self._ports[index] = serial
-                    return serial
+        for serial in devices:
+            if self._looks_like_ldplayer(serial):
+                self._ports[index] = serial
+                return serial
 
         raise AdbError(f"no adb device found for LDPlayer instance index {index}")
+
+    def _port_listening(self, port: int) -> bool:
+        """Sub-second TCP probe so dead ports never reach slow adb calls."""
+        import socket
+        try:
+            with socket.create_connection((self.host, port), timeout=0.5):
+                return True
+        except OSError:
+            return False
 
     def _devices(self) -> list[str]:
         out = self._run(["devices"], timeout=15)
