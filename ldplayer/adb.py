@@ -302,7 +302,17 @@ class Adb:
                     str(duration_ms)], discover=discover)
 
     def input_text(self, index: int, text: str, discover: bool = True) -> str:
-        return self.shell(index, ["input", "text", text], discover=discover)
+        """Type into the focused field.
+
+        adb joins argv with spaces and hands the result to the device's
+        /system/bin/sh, so unquoted metacharacters (<, >, ;, |, (, ),
+        ^ …) explode — e.g. ``input text ab<x`` tries to redirect stdin.
+        Single-quoting the payload makes sh treat everything literally;
+        embedded single quotes are escaped sh-style. Spaces ride along
+        fine inside quotes (no %s gymnastics needed).
+        """
+        quoted = "'" + text.replace("'", "'\\''") + "'"
+        return self.shell(index, ["input", "text", quoted], discover=discover)
 
     def keyevent(self, index: int, keycode: int, discover: bool = True) -> str:
         return self.shell(index, ["input", "keyevent", str(keycode)],

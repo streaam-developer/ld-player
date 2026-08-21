@@ -336,17 +336,34 @@ class FacebookFlow:
             f"{last_error}")
 
     def _wait_for_screen_change(self, text_gone: str | list[str],
-                                timeout: float = 30) -> None:
-        """Wait until `text_gone` (a string or list of strings) disappears
-        from the screen, confirming the tap registered and the UI moved on."""
-        texts = [text_gone] if isinstance(text_gone, str) else text_gone
+                                timeout: float = 10) -> None:
+        """Wait until the screen visibly moves on after a tap.
+
+        Two ways to succeed: the watched text disappears, OR the visible
+        label set changes substantially (the next screen often keeps a
+        'Next' button of its own, so waiting for the word to vanish would
+        burn the full timeout every single step).
+        """
+        texts = [text_gone] if isinstance(text_gone, str) else list(text_gone)
+        low = [t.lower() for t in texts]
         start = time.time()
+        baseline: set[str] | None = None
         while time.time() - start < timeout:
-            if not any(self.auto.find_text(t) for t in texts):
+            labels = [l.lower() for l in self._screen_labels()]
+            if not any(t in label for label in labels for t in low):
                 self.step("screen_change",
                           f"{texts} gone — screen transitioned")
                 return
-            time.sleep(1.5)
+            current = set(labels)
+            if baseline is not None and current != baseline:
+                changed = len(current ^ baseline)
+                if changed >= max(4, len(baseline) // 2):
+                    self.step("screen_change",
+                              f"screen content changed "
+                              f"({changed} labels differ) — transitioned")
+                    return
+            baseline = current
+            time.sleep(1.0)
         self.step("screen_change_warn",
                   f"{texts} still visible after {timeout}s — continuing anyway")
 
@@ -422,17 +439,13 @@ class FacebookFlow:
             last_x, last_y = w // 2, int(h * 0.48)
 
         self.step("name_type", f"typing first name '{first_name}'")
-        self.auto.tap(first_x, first_y, wait=0.5)
-        self.auto.type_text(first_name)
-        time.sleep(0.5)
+        self.auto.fill_field(first_x, first_y, first_name)
 
         self.step("name_type", f"typing last name '{last_name}'")
-        self.auto.tap(last_x, last_y, wait=0.5)
-        self.auto.type_text(last_name)
-        time.sleep(0.5)
+        self.auto.fill_field(last_x, last_y, last_name)
 
         self.auto.key(4)  # dismiss keyboard
-        time.sleep(0.5)
+        time.sleep(0.4)
 
         next_pos = self._wait_for_text_with_retry(NEXT_BUTTON, timeout)
         self.step("name_next", f"clicking Next at {next_pos}")
@@ -643,12 +656,10 @@ class FacebookFlow:
             ex, ey = w // 2, int(h * 0.42)
 
         self.step("email_type", f"typing email '{email}'")
-        self.auto.tap(ex, ey, wait=0.5)
-        self.auto.type_text(email)
-        time.sleep(0.5)
+        self.auto.fill_field(ex, ey, email)
 
         self.auto.key(4)  # dismiss keyboard
-        time.sleep(0.5)
+        time.sleep(0.4)
 
         next_pos = self._wait_for_text_with_retry(NEXT_BUTTON, timeout)
         self.step("email_next", f"clicking Next at {next_pos}")
@@ -665,12 +676,12 @@ class FacebookFlow:
     # -------------------------------------------------------- password
     def create_password(self, password: str | None = None,
                         timeout: float = 60) -> None:
-        """Wait for the 'Create a password' screen, type a strong password,
-        press Next, then save email|password to ``raw.txt``."""
-        self.step("password_screen",
-                  f"waiting for '{PASSWORD_SCREEN_HEADER}' ...")
-        self.auto.wait_for_text(PASSWORD_SCREEN_HEADER, timeout)
-        time.sleep(1)
+        """Type a strong password, press Next, then save email|password
+        to ``raw.txt``."""
+        if not self.auto.find_text(PASSWORD_SCREEN_HEADER):
+            self.step("password_screen",
+                      f"waiting for '{PASSWORD_SCREEN_HEADER}' ...")
+            self.auto.wait_for_text(PASSWORD_SCREEN_HEADER, timeout)
 
         if password is None:
             password = self._random_password()
@@ -683,13 +694,11 @@ class FacebookFlow:
             w, h = self.auto.resolution()
             px, py = w // 2, int(h * 0.42)
 
-        self.step("password_type", f"typing password")
-        self.auto.tap(px, py, wait=0.5)
-        self.auto.type_text(password)
-        time.sleep(0.5)
+        self.step("password_type", "typing password")
+        self.auto.fill_field(px, py, password)
 
         self.auto.key(4)  # dismiss keyboard
-        time.sleep(0.5)
+        time.sleep(0.4)
 
         next_pos = self._wait_for_text_with_retry(NEXT_BUTTON, timeout)
         self.step("password_next", f"clicking Next at {next_pos}")
@@ -700,18 +709,23 @@ class FacebookFlow:
 
     @staticmethod
     def _random_password(length: int = 16) -> str:
-        """Generate an advanced password: upper, lower, digit, symbol mix."""
+        """Generate an advanced password: upper, lower, digit, symbol mix.
+
+        Symbols exclude '%' (``input text`` turns a literal '%s' into a
+        space) and shell-hostile quotes/backslashes.
+        """
         cats = [
             random.choices(string.ascii_uppercase, k=2),
             random.choices(string.ascii_lowercase, k=length // 2 - 1),
             random.choices(string.digits, k=3),
-            random.choices("!@#$%^&*()-_=+[]{}|;:,.<>?", k=2),
+            random.choices("!@#$^&*()-_=+[]{};:,.<>?", k=2),
         ]
         pw = "".join(c for group in cats for c in group)
         remaining = length - len(pw)
         if remaining > 0:
             pw += "".join(random.choices(
-                string.ascii_letters + string.digits + "!@#$%^&*", k=remaining))
+                string.ascii_letters + string.digits + "!@#$^&*-_=?",
+                k=remaining))
         pw_list = list(pw)
         random.shuffle(pw_list)
         return "".join(pw_list)
@@ -815,11 +829,10 @@ class FacebookFlow:
             w, h = self.auto.resolution()
             ox, oy = w // 2, int(h * 0.42)
 
-        self.auto.tap(ox, oy, wait=0.5)
-        self.auto.type_text(code)
-        time.sleep(0.5)
+        self.auto.fill_field(ox, oy, code)
+
         self.auto.key(4)  # dismiss keyboard
-        time.sleep(0.5)
+        time.sleep(0.4)
 
     # -------------------------------------------------------- human-block check
     def check_human_block(self, timeout: float = 30) -> bool:

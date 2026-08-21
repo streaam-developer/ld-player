@@ -138,6 +138,26 @@ class Automator:
         self._invalidate_ui()
         self.adb.input_text(self.instance.index, text)
 
+    def clear_focused(self, keys: int = 30) -> None:
+        """Blast DEL keyevents into the focused field — one adb call.
+
+        Guarantees an empty field before typing, so retries never
+        concatenate garbage into half-typed inputs.
+        """
+        self._invalidate_ui()
+        self.adb.shell(self.instance.index,
+                       [f"i=0; while [ $i -lt {keys} ]; do "
+                        f"input keyevent 67; i=$((i+1)); done"],
+                       timeout=30, discover=True)
+
+    def fill_field(self, x: int, y: int, text: str,
+                   wait: float = 0.4) -> None:
+        """Tap a field, wipe it, type text into it."""
+        self.tap(x, y, wait=wait)
+        self.clear_focused()
+        self.type_text(text)
+        time.sleep(0.3)
+
     def key(self, keycode: int) -> None:
         self._invalidate_ui()
         self.adb.keyevent(self.instance.index, keycode)
