@@ -547,54 +547,74 @@ class FacebookFlow:
         return None
 
     def _scroll_year_wheel_to(self, target_year: int,
-                              max_steps: int = 80) -> None:
+                              max_steps: int = 120) -> None:
         """Scroll the right-most wheel until its value equals ``target_year``.
 
-        Two-phase strategy: long multi-row drags while far away, then
-        short single-row nudges for the last stretch. A value is only
-        acted on after two consecutive identical reads, so momentum
-        flybys are never mistaken for arrival.
+        Deterministic strategy: read the wheel, then cover the bulk of the
+        distance with bursts of *gentle* single-row swipes (no re-dump
+        between them — dumping after every row was what made scrolling
+        crawl), and verify per-swipe only on the final approach. Gentle
+        swipes never trigger fling momentum, so the wheel cannot spin
+        past the target. Arrival is confirmed by two identical reads so
+        an animated flyby is never mistaken for success. An unreadable
+        value (mid-animation render) nudges gently instead of freezing.
         """
-        deadline = time.time() + 120
-        last_value: int | None = None
+        deadline = time.time() + 150
+
+        def geometry(wheel: dict) -> tuple[int, int]:
+            b = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]",
+                         wheel.get("bounds", ""))
+            return ((int(b.group(1)) + int(b.group(3))) // 2,
+                    (int(b.group(2)) + int(b.group(4))) // 2)
+
+        last_seen: int | None = None
         for _attempt in range(max_steps):
-            self.auto._invalidate_ui()   # fresh read, never the TTL cache
+            self.auto._invalidate_ui()   # fresh dump, never the TTL cache
             wheels = self._picker_wheels()
             if not wheels:
                 raise AutomationError("date picker wheels not found")
             year_wheel = wheels[-1]      # right-most column = year
             value = self._wheel_value(year_wheel)
+            x, cy = geometry(year_wheel)
 
-            b = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]",
-                         year_wheel.get("bounds", ""))
-            x = (int(b.group(1)) + int(b.group(3))) // 2
-            cy = (int(b.group(2)) + int(b.group(4))) // 2
-            half_h = max((int(b.group(4)) - int(b.group(2))) // 2, 80)
-
-            # two equal reads => the wheel has settled and is safe to act on
-            if value is not None and value == last_value:
-                if value == target_year:
+            if value == target_year:
+                if value == last_seen:
                     self.step("birthday_scroll",
                               f"year wheel settled on {value}")
                     return
+                last_seen = value        # first sighting — confirm once
+                continue
 
-                going_back = value > target_year
-                if abs(value - target_year) > 8:
-                    # coarse: drag most of the wheel height ≈ several rows
-                    dist = int(half_h * 1.4)
-                    dur = 260
-                else:
-                    dist = 60
-                    dur = 350
-                # finger downward => smaller values come to centre
-                y1, y2 = ((cy - dist, cy + dist) if going_back
-                          else (cy + dist, cy - dist))
-                self.auto.swipe(x, y1, x, y2, duration_ms=dur, wait=0.35)
-            last_value = value
+            if value is None:
+                # unreadable (mid-animation): gentle backward nudge
+                self.auto.swipe(x, cy - 60, x, cy + 60,
+                                duration_ms=300, wait=0.4)
+                continue
+
+            last_seen = value
+            going_back = value > target_year
+            y1, y2 = ((cy - 60, cy + 60) if going_back
+                      else (cy + 60, cy - 60))
+
+            if abs(value - target_year) <= 3:
+                # final approach: one row per swipe, verified every time
+                self.auto.swipe(x, y1, x, y2, duration_ms=320, wait=0.45)
+                continue
+
+            # bulk distance: burst of single-row swipes, then re-read
+            burst = min(abs(value - target_year) - 1, 8)
+            self.step("birthday_scroll",
+                      f"{value} -> {target_year}: bursting {burst} rows "
+                      f"{'back' if going_back else 'forward'}")
+            for _i in range(burst):
+                self.auto.swipe(x, y1, x, y2, duration_ms=280, wait=0.2)
 
             if time.time() > deadline:
-                raise AutomationError(
-                    f"year wheel did not reach {target_year} in time")
+                break
+
+        raise AutomationError(
+            f"year wheel did not reach {target_year} "
+            f"(last seen {last_seen})")
 
     def _tap_next_if_present(self, timeout: float = 30) -> bool:
         """Tap 'Next' when it shows up; tolerate screens that have none."""
