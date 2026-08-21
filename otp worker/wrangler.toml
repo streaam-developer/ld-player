@@ -1,0 +1,9 @@
+name = "otp-worker"
+main = "cf-worker.js"
+compatibility_date = "2024-01-01"
+
+[[kv_namespaces]]
+binding = "OTP_STORE"
+id = "c65fade99f6d4c04bd8695571bc918ce"
+
+[vars]
