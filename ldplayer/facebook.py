@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 import string
 import time
 
@@ -439,86 +440,155 @@ class FacebookFlow:
         self._wait_for_screen_change(NEXT_BUTTON, timeout=30)
 
     # -------------------------------------------------------- birthday
-    def set_birthday(self, timeout: float = 60,
+    def _date_picker_open(self) -> bool:
+        """True when the Android DatePicker popup is showing."""
+        return bool(self.auto.find_by_class("DatePicker"))
+
+    def set_birthday(self, timeout: float = 90,
                      min_age_years: int = 21) -> None:
-        """Wait for the birthday screen, open the date picker, scroll the
-        year wheel to set a date at least ``min_age_years`` in the past,
-        click 'Set', then click 'Next'."""
-        self.step("birthday_screen",
-                  f"waiting for '{BIRTHDAY_SCREEN_HEADER}' ...")
-        self.auto.wait_for_text(BIRTHDAY_SCREEN_HEADER, timeout)
-        time.sleep(1)
+        """Set a birth date at least ``min_age_years`` in the past.
 
-        self.step("birthday_picker", "opening date picker ...")
-        w, h = self.auto.resolution()
-        picker_trigger = self.auto.find_text("Enter your birthday")
-        if not picker_trigger:
-            picker_trigger = self.auto.find_text("Birthday")
-        if picker_trigger:
-            self.auto.tap(*picker_trigger, wait=1.5)
-        else:
-            self.auto.tap(w // 2, int(h * 0.45), wait=1.5)
+        Newer Facebook builds auto-open an Android DatePicker popup
+        (month/day/year NumberPicker wheels + SET/CANCEL) over the
+        birthday page, hiding the page's own texts — so we detect the
+        popup itself and never block on the header being visible.
+        """
+        # wait until either the picker is already open or the page is there
+        start = time.time()
+        while time.time() - start < min(timeout, 30):
+            if self._date_picker_open():
+                break
+            if self.auto.find_text("birthday"):
+                break
+            time.sleep(1.5)
 
-        self._scroll_date_picker_to_old_date(min_age_years)
+        if not self._date_picker_open():
+            self.step("birthday_picker", "opening date picker ...")
+            w, h = self.auto.resolution()
+            trigger = (self.auto.find_text("Enter your birthday")
+                       or self.auto.find_text("Birthday"))
+            if trigger:
+                self.auto.tap(*trigger, wait=2)
+            else:
+                self.auto.tap(w // 2, int(h * 0.45), wait=2)
+            if not self._date_picker_open():
+                self.step("birthday_warn",
+                          "picker still not open — trying centre tap")
+                self.auto.tap(w // 2, int(h * 0.45), wait=2)
 
-        set_pos = self._wait_for_text_with_retry(SET_BUTTON, timeout=15)
+        target_year = time.localtime().tm_year - min_age_years - 1
+        self._scroll_year_wheel_to(target_year)
+
+        set_pos = self._wait_for_text_with_retry(SET_BUTTON, timeout=20)
         self.step("birthday_set", f"clicking Set at {set_pos}")
         self.auto.tap(*set_pos, wait=2)
-        self._wait_for_screen_change(SET_BUTTON, timeout=15)
 
-        time.sleep(1)
-        next_pos = self._wait_for_text_with_retry(NEXT_BUTTON, timeout=timeout)
-        self.step("birthday_next", f"clicking Next at {next_pos}")
+        # popup must close; then continue with whatever comes next
+        start = time.time()
+        while time.time() - start < 15 and self._date_picker_open():
+            time.sleep(1)
+        self._tap_next_if_present(timeout=30)
+
+    def _picker_wheels(self) -> list[dict]:
+        """DatePicker NumberPicker nodes sorted left -> right."""
+        wheels = [n for n in self.auto.find_by_class("NumberPicker")
+                  if n.get("bounds")]
+        wheels.sort(key=lambda n: int(n["bounds"].strip("[]").split(",")[0]))
+        return wheels
+
+    def _wheel_value(self, wheel: dict) -> int | None:
+        """Read the selected (centre) value of one NumberPicker wheel.
+
+        The selected item is exposed as an EditText child of the wheel;
+        neighbours are Buttons.
+        """
+        b = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", wheel.get("bounds", ""))
+        if not b:
+            return None
+        x1, y1, x2, y2 = map(int, b.groups())
+        for node in self.auto.find_by_class("EditText"):
+            nb = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]",
+                          node.get("bounds", "") or "")
+            if not nb:
+                continue
+            nx1, ny1, nx2, ny2 = map(int, nb.groups())
+            if nx1 >= x1 and nx2 <= x2 and ny1 >= y1 and ny2 <= y2:
+                text = (node.get("text") or "").strip()
+                digits = re.sub(r"[^0-9]", "", text)
+                if digits:
+                    return int(digits)
+        return None
+
+    def _scroll_year_wheel_to(self, target_year: int,
+                              max_steps: int = 80) -> None:
+        """Scroll the right-most wheel until its value equals ``target_year``.
+
+        Each swipe is short (~one row) and the wheel is re-read after every
+        couple of steps, so momentum overshoot gets corrected instead of
+        compounding like long flings do.
+        """
+        deadline = time.time() + 180
+        for attempt in range(max_steps):
+            wheels = self._picker_wheels()
+            if not wheels:
+                raise AutomationError("date picker wheels not found")
+            year_wheel = wheels[-1]          # right-most column = year
+            value = self._wheel_value(year_wheel)
+
+            b = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]",
+                         year_wheel.get("bounds", ""))
+            x = (int(b.group(1)) + int(b.group(3))) // 2
+            cy = (int(b.group(2)) + int(b.group(4))) // 2
+
+            if attempt % 2 == 0:             # verify every 2 swipes
+                if value == target_year:
+                    self.step("birthday_scroll",
+                              f"year wheel now on {value}")
+                    return
+                if value is not None:
+                    remaining = abs(value - target_year)
+                    if remaining > 12:
+                        self.step("birthday_scroll",
+                                  f"{value} -> {target_year} "
+                                  f"(~{remaining} rows left)")
+            if value is not None and value == target_year:
+                return
+
+            going_back = value is None or value > target_year
+            # finger downward => smaller values come to centre
+            y1, y2 = (cy - 60, cy + 60) if going_back else (cy + 60, cy - 60)
+            self.auto.swipe(x, y1, x, y2, duration_ms=350, wait=0.35)
+
+            if time.time() > deadline:
+                raise AutomationError(
+                    f"year wheel did not reach {target_year} in time")
+
+    def _tap_next_if_present(self, timeout: float = 30) -> bool:
+        """Tap 'Next' when it shows up; tolerate screens that have none."""
+        try:
+            next_pos = self._wait_for_text_with_retry(NEXT_BUTTON,
+                                                      timeout=timeout)
+        except AutomationError:
+            self.step("next_warn", "no Next button found — continuing")
+            return False
+        self.step("next_click", f"clicking Next at {next_pos}")
         self.auto.tap(*next_pos, wait=2)
         self._wait_for_screen_change(NEXT_BUTTON, timeout=30)
-
-    def _scroll_date_picker_to_old_date(self, min_age_years: int = 21) -> None:
-        """Scroll the year column of the Android date picker backwards so
-        the selected year is at least ``min_age_years`` in the past.
-
-        The Android DatePicker uses a vertical number-picker for each of
-        month / day / year.  We locate the year wheel by looking for the
-        current 4-digit year on screen, then we swipe it upward (which
-        decrements the value) enough times.
-        """
-        year_text = str(time.localtime().tm_year)
-        year_pos = self.auto.find_text(year_text)
-        if not year_pos:
-            self.step("birthday_warn",
-                      "could not locate year on date picker — trying blind scroll")
-            w, h = self.auto.resolution()
-            year_pos = (w // 2, h // 2)
-
-        year_x, year_y = year_pos
-
-        scrolls_needed = min_age_years + 1
-        self.step("birthday_scroll",
-                  f"scrolling year wheel back ~{scrolls_needed} years "
-                  f"(from {time.localtime().tm_year} to "
-                  f"{time.localtime().tm_year - scrolls_needed})")
-
-        w, h = self.auto.resolution()
-        swipe_top = int(h * 0.35)
-        swipe_bot = int(h * 0.65)
-
-        for i in range(scrolls_needed):
-            self.auto.swipe(year_x, swipe_top, year_x, swipe_bot,
-                            duration_ms=300, wait=0.3)
-            if (i + 1) % 5 == 0:
-                self.step("birthday_scroll_progress",
-                          f"  scrolled {i + 1}/{scrolls_needed} years")
-
-        time.sleep(1)
+        return True
 
     # -------------------------------------------------------- gender
     def select_gender(self, gender: str = "Male",
                       timeout: float = 60) -> None:
-        """Wait for the 'What's your gender?' screen, tap the requested
-        option, then press Next."""
-        self.step("gender_screen",
-                  f"waiting for '{GENDER_SCREEN_HEADER}' ...")
-        self.auto.wait_for_text(GENDER_SCREEN_HEADER, timeout)
-        time.sleep(1)
+        """Tap the requested gender option, then press Next.
+
+        Tolerates screens where the 'What's your gender?' header text is
+        worded differently — the option itself is what matters.
+        """
+        start = time.time()
+        while time.time() - start < timeout:
+            if self.auto.find_text(gender):
+                break
+            time.sleep(1.5)
 
         self.step("gender_select", f"selecting '{gender}' ...")
         pos = self._wait_for_text_with_retry(gender, timeout)
@@ -532,21 +602,30 @@ class FacebookFlow:
     # -------------------------------------------------------- email signup
     def enter_email(self, email: str | None = None,
                     timeout: float = 60) -> None:
-        """Wait for the mobile-number screen, tap 'Sign up with email',
-        wait for the email entry screen, type the address, press Next.
+        """Get to the email-entry screen (tapping 'Sign up with email' if
+        the mobile-number screen appears first), type the address, press
+        Next.
 
         If *email* is ``None`` a random 7-letter address at
         ``dailykhabar.bond`` is generated.
         """
-        self.step("mobile_screen",
-                  f"waiting for '{MOBILE_SCREEN_HEADER}' ...")
-        self.auto.wait_for_text(MOBILE_SCREEN_HEADER, timeout)
-        time.sleep(1)
-
-        self.step("email_switch", "tapping 'Sign up with email' ...")
-        email_btn = self._wait_for_text_with_retry(SIGN_UP_WITH_EMAIL, timeout)
-        self.auto.tap(*email_btn, wait=2)
-        self._wait_for_screen_change(SIGN_UP_WITH_EMAIL, timeout=30)
+        # reach the email field from whichever variant shows up
+        start = time.time()
+        on_email_screen = False
+        while time.time() - start < timeout:
+            if self.auto.find_text(EMAIL_SCREEN_HEADER):
+                on_email_screen = True
+                break
+            btn = self.auto.find_text(SIGN_UP_WITH_EMAIL)
+            if btn:
+                self.step("email_switch", "tapping 'Sign up with email' ...")
+                self.auto.tap(*btn, wait=2)
+                self._wait_for_screen_change(SIGN_UP_WITH_EMAIL, timeout=30)
+                continue
+            time.sleep(1.5)
+        if not on_email_screen:
+            raise AutomationError(
+                "neither the email field nor 'Sign up with email' appeared")
 
         if email is None:
             email = self._random_email()
@@ -784,42 +863,163 @@ class FacebookFlow:
               f"successful={data['successful']} failed={data['failed']} "
               f"({dest})", flush=True)
 
+    # -------------------------------------------------------- screen state
+    #: (screen-id, any-of fragments). Order matters: later screens are
+    #: checked first so a partially-matching earlier screen never wins.
+    _SCREEN_MATCHERS: list[tuple[str, tuple[str, ...]]] = [
+        ("human_block", HUMAN_BLOCK_FRAGMENTS),
+        ("confirmation", ("confirmation", "enter the code",
+                          "we've sent", "check your email")),
+        ("terms", ("I agree", "agree", "privacy policy")),
+        ("password", (PASSWORD_SCREEN_HEADER,)),
+        ("email", (EMAIL_SCREEN_HEADER,)),
+        ("mobile", (MOBILE_SCREEN_HEADER, SIGN_UP_WITH_EMAIL,
+                    "Enter your mobile number")),
+        ("gender", (GENDER_SCREEN_HEADER, "Male", "Female")),
+        ("birthday", (BIRTHDAY_SCREEN_HEADER, "birthday")),
+        ("name", (NAME_SCREEN_HEADER,)),
+        ("entry", tuple(t.lower() for t in SIGNUP_ENTRY_BUTTONS)),
+    ]
+
+    def _screen_labels(self) -> list[str]:
+        """Lower-cased labels of everything visible right now."""
+        try:
+            xml = self.auto.dump_ui()
+        except Exception:
+            return []
+        return [label.lower() for label, _x, _y, _c in
+                self.auto._text_nodes(xml)]
+
+    def _classify_screen(self, labels: list[str]) -> str:
+        joined = " | ".join(labels)
+        for screen_id, fragments in self._SCREEN_MATCHERS:
+            if any(f.lower() in joined for f in fragments):
+                return screen_id
+        return "unknown"
+
+    def _tap_permission_if_present(self) -> bool:
+        """One quick pass over the known permission-dialog buttons."""
+        for button in PERMISSION_BUTTONS:
+            pos = self.auto.find_text(button)
+            if pos:
+                self.step("permission_allow",
+                          f"tapping '{button}' at {pos}")
+                self.auto.tap(*pos, wait=1.5)
+                return True
+        return False
+
     # --------------------------------------------------------------- runner
     def run(self, step_wait: float = 3.0, hold: bool = False,
             grant_perms: bool = True, boot_timeout: float = 600,
             install_timeout: float = 840,
             apk_path: str | Path | None = None,
             first_name: str = "Alex", last_name: str = "Johnson",
-            otp_timeout: float = 120) -> dict:
+            otp_timeout: float = 120,
+            flow_timeout: float = 1500) -> dict:
+        """Adaptive signup loop.
+
+        Instead of a rigid step order, we classify whatever screen Facebook
+        currently shows and run its handler — so popups, extra pages, and
+        mid-flow resumes all work. Each stage runs once; permission dialogs
+        and interstitials are handled whenever they appear.
+        """
         self.open_instance_and_launcher(boot_timeout)
-        time.sleep(step_wait)
         self.ensure_facebook_installed(apk_path, timeout=install_timeout)
-        time.sleep(step_wait)
         if grant_perms:
-            self.pre_grant_permissions()
+            try:
+                self.pre_grant_permissions()
+            except Exception:  # noqa: BLE001
+                pass
         self.open_facebook(timeout=240)
-        time.sleep(step_wait)
-        self.click_login_create_account(hold=hold)
-        time.sleep(step_wait)
-        self.submit_create_form()
-        time.sleep(step_wait)
-        self.allow_permission()
-        time.sleep(step_wait)
-        self.enter_name(first_name, last_name)
-        time.sleep(step_wait)
-        self.set_birthday()
-        time.sleep(step_wait)
-        self.select_gender()
-        time.sleep(step_wait)
-        self.enter_email()
-        time.sleep(step_wait)
-        self.create_password()
-        time.sleep(step_wait)
-        self.agree_to_terms()
-        time.sleep(step_wait)
-        self.wait_for_confirmation(otp_timeout=otp_timeout)
-        time.sleep(step_wait)
-        blocked = self.check_human_block()
+
+        done: set[str] = set()
+        attempts: dict[str, int] = {}
+        stall = 0
+        deadline = time.time() + flow_timeout
+
+        while time.time() < deadline:
+            labels = self._screen_labels()
+
+            # popups first — they overlay and hide real content
+            if not self._date_picker_open():
+                self._dismiss_interstitial_popups(timeout=4)
+
+            screen = self._classify_screen(labels)
+            attempts[screen] = attempts.get(screen, 0) + 1
+            self.step("screen", f"on '{screen}' screen "
+                      f"(visit {attempts[screen]})")
+
+            try:
+                if screen == "human_block":
+                    self._update_tracker(success=False)
+                    self.step("done",
+                              "flow finished — BLOCKED by human verification")
+                    return self.report
+
+                elif screen == "confirmation":
+                    self.wait_for_confirmation(otp_timeout=otp_timeout)
+                    done.add("confirmation")
+                    break  # final human-block scan below decides success
+
+                elif screen == "terms" and "terms" not in done:
+                    self.agree_to_terms()
+                    done.add("terms")
+
+                elif screen == "password" and "password" not in done:
+                    self.create_password()
+                    done.add("password")
+
+                elif (screen in ("email", "mobile")
+                      and "contact" not in done):
+                    self.enter_email()
+                    done.add("contact")
+
+                elif screen == "gender" and "gender" not in done:
+                    self.select_gender()
+                    done.add("gender")
+
+                elif (screen == "birthday"
+                      and "birthday" not in done):
+                    self.set_birthday()
+                    done.add("birthday")
+
+                elif screen == "name" and "name" not in done:
+                    self.enter_name(first_name, last_name)
+                    done.add("name")
+
+                elif screen == "entry" and "entry" not in done:
+                    self.click_login_create_account(hold=hold)
+                    self.submit_create_form()
+                    done.add("entry")
+
+                else:
+                    # unknown screen / stage already complete
+                    if self._tap_permission_if_present():
+                        continue
+                    if screen == "unknown":
+                        stall += 1
+                        self.step("stall",
+                                  f"unrecognised screen ({stall} consecutive)")
+                        if stall % 5 == 0:
+                            self.auto.back()
+                            time.sleep(1.5)
+                        time.sleep(2)
+                        continue
+                    time.sleep(1.5)
+                    continue
+            except Exception as exc:  # noqa: BLE001
+                self.step("stage_error",
+                          f"'{screen}' handler failed: {exc}")
+                if attempts[screen] >= 3:
+                    raise
+                time.sleep(2)
+                continue
+
+            # a completed stage means we made progress
+            stall = 0
+
+        # flow window over — final human-block scan decides success
+        blocked = self.check_human_block(timeout=20)
         self._update_tracker(success=not blocked)
         if blocked:
             self.step("done", "flow finished — BLOCKED by human verification")
