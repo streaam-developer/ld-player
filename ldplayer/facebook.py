@@ -93,8 +93,16 @@ CONFIRMATION_HEADER = "confirmation"
 CONFIRM_WAIT_SECONDS = 30
 
 #: Human verification block screen
-HUMAN_BLOCK_FRAGMENTS = ["confirm you", "confirm your", "human",
-                         "use your account", "suspicious"]
+#: NOTE: deliberately narrow. Facebook's *legitimate* confirmation-code
+#: page also says things like "...to confirm your account", so greedy
+#: phrases ("confirm your", bare "human") misrouted that page as a block
+#: and aborted the signup before any OTP was entered. Only unmistakable
+#: block wording belongs here.
+HUMAN_BLOCK_FRAGMENTS = ["suspicious", "unusual activity",
+                         "use your account", "temporarily locked",
+                         "locked out", "prove you're human",
+                         "prove you’re human", "are you a human",
+                         "not a robot"]
 
 #: File to save generated credentials
 CREDENTIALS_FILE = "raw.txt"
@@ -766,9 +774,22 @@ class FacebookFlow:
         self.step("terms_click", "looking for 'I agree' button ...")
         pos = self._wait_for_text_with_retry(I_AGREE_BUTTON, timeout)
         self.auto.tap(*pos, wait=2)
+
+        # wait for terms to process — exit early the moment the screen
+        # content changes instead of sleeping the full window blindly
         self.step("terms_wait",
-                  f"waiting {wait_after:.0f}s for terms to process ...")
-        time.sleep(wait_after)
+                  f"waiting up to {wait_after:.0f}s for terms to process ...")
+        baseline = set(self._screen_labels())
+        deadline = time.time() + wait_after
+        while time.time() < deadline:
+            current = set(self._screen_labels())
+            changed = len(current ^ baseline)
+            if changed >= 4:
+                self.step("terms_wait",
+                          f"screen changed ({changed} labels differ) "
+                          f"— terms processed")
+                return
+            time.sleep(1.5)
 
     # -------------------------------------------------------- confirmation
     def wait_for_confirmation(self, timeout: float = 60,
@@ -877,12 +898,14 @@ class FacebookFlow:
               f"({dest})", flush=True)
 
     # -------------------------------------------------------- screen state
-    #: (screen-id, any-of fragments). Order matters: later screens are
-    #: checked first so a partially-matching earlier screen never wins.
+    #: (screen-id, any-of fragments). Order matters: earlier entries win.
+    #: 'confirmation' MUST precede 'human_block' — the OTP page shares
+    #: vocabulary with block screens ("confirm ..."), and the block
+    #: fragments are only unmistakable wording, never generic.
     _SCREEN_MATCHERS: list[tuple[str, tuple[str, ...]]] = [
-        ("human_block", HUMAN_BLOCK_FRAGMENTS),
         ("confirmation", ("confirmation", "enter the code",
                           "we've sent", "check your email")),
+        ("human_block", HUMAN_BLOCK_FRAGMENTS),
         ("terms", ("I agree", "agree", "privacy policy")),
         ("password", (PASSWORD_SCREEN_HEADER,)),
         ("email", (EMAIL_SCREEN_HEADER,)),
@@ -964,6 +987,20 @@ class FacebookFlow:
 
             try:
                 if screen == "human_block":
+                    # last-resort guard: a page with an input field and
+                    # 'code' wording is the confirmation screen, not a block
+                    joined = " | ".join(labels)
+                    if (self.auto.find_edit_texts()
+                            and "code" in joined):
+                        self.step(
+                            "screen_fix",
+                            "'human_block' has an OTP field — "
+                            "treating as confirmation screen")
+                        screen = "confirmation"
+                        self.wait_for_confirmation(otp_timeout=otp_timeout)
+                        done.add("confirmation")
+                        break  # final human-block scan decides success
+
                     self._update_tracker(success=False)
                     self.step("done",
                               "flow finished — BLOCKED by human verification")
@@ -1023,7 +1060,7 @@ class FacebookFlow:
             except Exception as exc:  # noqa: BLE001
                 self.step("stage_error",
                           f"'{screen}' handler failed: {exc}")
-                if attempts[screen] >= 3:
+                if attempts.get(screen, 0) >= 3:
                     raise
                 time.sleep(2)
                 continue
