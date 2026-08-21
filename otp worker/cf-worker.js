@@ -28,19 +28,51 @@ export default {
   // ---------------------------------------------------------- email handler
   async email(message, env, ctx) {
     const recipient = message.to;
-    const rawBody = await new Response(message.raw).text();
 
-    // Facebook confirmation emails contain a numeric code.
-    // Match common patterns: "code is 12345", "code: 12345", standalone 5-8 digit
-    const codeMatch = rawBody.match(/(?:code[:\s]+|is\s+)(\d{5,8})/i)
-                   || rawBody.match(/(\d{5,8})/);
+    // Facebook's signup confirmation emails carry the code in the
+    // SUBJECT line ("12345 is your Facebook confirmation code") and it
+    // is always exactly 5 digits.
+    //
+    // NEVER scan message.raw for bare digit-runs: the RFC822 headers at
+    // the top are full of 13-digit millisecond timestamps (DKIM/ARC
+    // "t=1787335365747"), which is how bogus 8-digit "codes" used to be
+    // extracted. Subject first; body only as a guarded fallback.
+    let code = null;
 
-    if (!codeMatch) {
-      console.log(`No code found in email to ${recipient}`);
+    const subject = message.headers.get("subject") || "";
+    const subjMatch = subject.match(/(?<!\d)(\d{5})(?!\d)/);
+    if (subjMatch) {
+      code = subjMatch[1];
+      console.log(`Code ${code} taken from subject for ${recipient}`);
+    }
+
+    if (!code) {
+      const rawBody = await new Response(message.raw).text();
+
+      // drop the headers: the body begins after the first blank line
+      let body = rawBody;
+      const sep = rawBody.indexOf("\r\n\r\n");
+      if (sep >= 0) body = rawBody.slice(sep + 4);
+
+      // decode simple quoted-printable soft/hard breaks that could split digits
+      body = body.replace(/=\r?\n/g, "").replace(/=([0-9A-Fa-f]{2})/g,
+        (_, h) => String.fromCharCode(parseInt(h, 16)));
+
+      // prefer an explicit "code" context, else a standalone 5-digit run
+      // ((?<!\d)(?!\d)) so parts of longer IDs/timestamps never match
+      const m = body.match(/code[^0-9]{0,30}(?<!\d)(\d{5})(?!\d)/i)
+             || body.match(/(?<!\d)(\d{5})(?!\d)/);
+      if (m) {
+        code = m[1];
+        console.log(`Code ${code} taken from body for ${recipient}`);
+      }
+    }
+
+    if (!code) {
+      console.log(`No 5-digit code found in email to ${recipient}`);
       return;
     }
 
-    const code = codeMatch[1];
     const key = `otp:${recipient}`;
     const record = JSON.stringify({ code, ts: Date.now() });
 

@@ -18,6 +18,7 @@ Usage::
 from __future__ import annotations
 
 import json
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -26,6 +27,10 @@ import urllib.request
 
 class OtpTimeout(RuntimeError):
     """Raised when the OTP code is not received within the timeout."""
+
+
+#: Facebook signup confirmation codes are always exactly five digits.
+OTP_SHAPE = re.compile(r"\d{5}")
 
 
 def fetch_otp(worker_url: str, api_key: str, email: str, *,
@@ -93,7 +98,15 @@ def _poll_once(url: str, api_key: str) -> str | None:
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read().decode())
             if resp.status == 200 and "code" in data:
-                return str(data["code"])
+                code = str(data["code"])
+                if not OTP_SHAPE.fullmatch(code):
+                    # bogus/stale record (e.g. digits lifted from a DKIM
+                    # timestamp) — ignore it and keep waiting; the worker
+                    # purges stale records after 3 minutes.
+                    print(f"  [otp] ignoring malformed code {code!r} "
+                          f"(expected 5 digits)", flush=True)
+                    return None
+                return code
             return None
     except urllib.error.HTTPError as exc:
         # 202 = not ready yet, 401 = bad key — both mean "try again"
