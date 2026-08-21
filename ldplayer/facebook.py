@@ -45,6 +45,11 @@ LOGIN_SCREEN_BUTTON = "Create new account"
 CREATE_FORM_BUTTON = "Create new account"
 PERMISSION_BUTTONS = ["Allow", "ALLOW", "Continue", "Not now"]
 
+#: Buttons that start the signup flow, across Facebook UI generations.
+#: Classic builds show "Create new account"; 2024+ Bloks landing screens
+#: use "Get started" (or "Sign up") instead.
+SIGNUP_ENTRY_BUTTONS = ["Create new account", "Get started", "Sign up"]
+
 #: Screens Facebook may show while loading that we should skip past
 LOADING_INDICATORS = ["loading", "connecting", "Logging in", "Signing in"]
 
@@ -238,21 +243,51 @@ class FacebookFlow:
 
     def click_login_create_account(self, timeout: float = 180,
                                    hold: bool = False) -> None:
-        self.step("login_cna", f"waiting for '{LOGIN_SCREEN_BUTTON}' ...")
-        pos = self._wait_for_text_with_retry(LOGIN_SCREEN_BUTTON, timeout)
-        self.step("login_cna_click", f"clicking 'Create new account' at {pos}")
+        # the app may have resumed straight into the signup flow
+        # (e.g. relaunched while the name screen was still on top)
+        if self.auto.find_text(NAME_SCREEN_HEADER):
+            self.step("login_skip",
+                      "already on the name screen — skipping entry tap")
+            return
+        self.step("login_cna",
+                  f"waiting for a signup entry button "
+                  f"({' / '.join(SIGNUP_ENTRY_BUTTONS)}) ...")
+        text, pos = self._wait_for_any_text_with_retry(
+            SIGNUP_ENTRY_BUTTONS, timeout, press_back=False)
+        self.step("login_cna_click", f"clicking '{text}' at {pos}")
         self.auto.tap(*pos, wait=2)
-        self._wait_for_screen_change(LOGIN_SCREEN_BUTTON, timeout=30)
+        self._wait_for_screen_change(SIGNUP_ENTRY_BUTTONS, timeout=30)
         if hold:
             input("Paused on the create-account screen. Press Enter to "
                   "continue...")
 
     def submit_create_form(self, timeout: float = 120) -> None:
-        self.step("form_cna", f"waiting for '{CREATE_FORM_BUTTON}' button ...")
-        pos = self._wait_for_text_with_retry(CREATE_FORM_BUTTON, timeout)
-        self.step("form_cna_click", f"clicking again at {pos}")
-        self.auto.tap(*pos, wait=2)
-        self._wait_for_screen_change(CREATE_FORM_BUTTON, timeout=30)
+        """Handle whatever follows the signup entry tap.
+
+        Classic builds show an intermediate screen with a second
+        'Create new account' button; newer Bloks builds jump straight to
+        the name screen. Either way, we end up ready for name entry.
+        """
+        self.step("form_cna", "waiting for create-form button or "
+                              "name screen ...")
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self.auto.find_text(NAME_SCREEN_HEADER):
+                self.step("form_skip",
+                          "already on the name screen — no second "
+                          "button needed")
+                return
+            for t in SIGNUP_ENTRY_BUTTONS:
+                pos = self.auto.find_text(t)
+                if pos:
+                    self.step("form_cna_click", f"clicking '{t}' at {pos}")
+                    self.auto.tap(*pos, wait=2)
+                    self._wait_for_screen_change(t, timeout=30)
+                    return
+            time.sleep(1.5)
+        self.step("form_warn",
+                  "no create-form button or name screen within timeout — "
+                  "continuing anyway")
 
     def pre_grant_permissions(self) -> None:
         for perm in SIGNUP_PERMISSIONS:
@@ -262,6 +297,58 @@ class FacebookFlow:
                 pass
 
     # -------------------------------------------------------- adaptive helpers
+    def _wait_for_any_text(self, texts: list[str],
+                           timeout: float = 120) -> tuple[str, tuple[int, int]]:
+        """Poll until any of `texts` is on screen. Returns (text, (x, y))."""
+        def find_any():
+            for t in texts:
+                pos = self.auto.find_text(t)
+                if pos:
+                    return t, pos
+            return None
+        return Waiter(timeout, poll=2.0,
+                      label=f"looking for {' / '.join(texts)}").until(
+            find_any, f"any of {texts} on screen")
+
+    def _wait_for_any_text_with_retry(self, texts: list[str],
+                                      timeout: float = 120,
+                                      max_retries: int = 3,
+                                      press_back: bool = True
+                                      ) -> tuple[str, tuple[int, int]]:
+        """Wait for any of several texts, retrying with back-off if the
+        UI is still settling."""
+        last_error: AutomationError | None = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                return self._wait_for_any_text(texts, timeout)
+            except AutomationError as exc:
+                last_error = exc
+                if attempt < max_retries:
+                    self.step("retry", f"none of {texts} found "
+                              f"(attempt {attempt}/{max_retries}) — "
+                              f"backing off and retrying...")
+                    if press_back:
+                        self.auto.back()
+                    time.sleep(3)
+        raise AutomationError(
+            f"could not find any of {texts} after {max_retries} attempts: "
+            f"{last_error}")
+
+    def _wait_for_screen_change(self, text_gone: str | list[str],
+                                timeout: float = 30) -> None:
+        """Wait until `text_gone` (a string or list of strings) disappears
+        from the screen, confirming the tap registered and the UI moved on."""
+        texts = [text_gone] if isinstance(text_gone, str) else text_gone
+        start = time.time()
+        while time.time() - start < timeout:
+            if not any(self.auto.find_text(t) for t in texts):
+                self.step("screen_change",
+                          f"{texts} gone — screen transitioned")
+                return
+            time.sleep(1.5)
+        self.step("screen_change_warn",
+                  f"{texts} still visible after {timeout}s — continuing anyway")
+
     def _wait_for_text_with_retry(self, text: str, timeout: float = 120,
                                   max_retries: int = 3) -> tuple[int, int]:
         """Wait for text with retries — if the UI is still settling,
@@ -280,19 +367,6 @@ class FacebookFlow:
                     time.sleep(3)
         raise AutomationError(
             f"could not find '{text}' after {max_retries} attempts: {last_error}")
-
-    def _wait_for_screen_change(self, text_gone: str,
-                                timeout: float = 30) -> None:
-        """Wait until `text_gone` disappears from the screen, confirming
-        the tap registered and the UI transitioned."""
-        start = time.time()
-        while time.time() - start < timeout:
-            if not self.auto.find_text(text_gone):
-                self.step("screen_change", f"'{text_gone}' gone — screen transitioned")
-                return
-            time.sleep(1.5)
-        self.step("screen_change_warn",
-                  f"'{text_gone}' still visible after {timeout}s — continuing anyway")
 
     def allow_permission(self, timeout: float = 120) -> bool:
         """Wait for the permission dialog and tap Allow/Continue.

@@ -11,7 +11,7 @@ import time
 
 from pathlib import Path
 
-from .adb import Adb
+from .adb import Adb, AdbError
 from .console import LdConsole
 from .instance import Instance
 
@@ -76,9 +76,30 @@ class Automator:
         self.adb = adb
         self.instance = instance
         self._ui_cache: tuple[float, str] | None = None
+        self._anim_settled = False
 
     def _invalidate_ui(self) -> None:
         self._ui_cache = None
+
+    def _settle_animations(self) -> None:
+        """Disable global animations once per session.
+
+        Facebook's Bloks screens run infinite spinners; uiautomator waits
+        for the accessibility tree to go idle before dumping and otherwise
+        stalls or reports "could not get idle state". Zeroing the animation
+        scales removes most of that churn.
+        """
+        if self._anim_settled:
+            return
+        self._anim_settled = True
+        for key in ("window_animation_scale", "transition_animation_scale",
+                    "animator_duration_scale"):
+            try:
+                self.adb.shell(self.instance.index,
+                               ["settings", "put", "global", key, "0"],
+                               timeout=15, discover=True)
+            except Exception:  # noqa: BLE001
+                pass
 
     # ------------------------------------------------------------ screen info
     def resolution(self) -> tuple[int, int]:
@@ -154,32 +175,44 @@ class Automator:
 
         The hierarchy is dumped to a file on the device and read back with
         ``exec-out cat`` (binary-safe). The destination is removed first so
-        a failed dump can never serve the previous screen's XML, every
-        result is validated to actually contain nodes, and transient
-        failures ("could not get idle state" during animations) are retried.
+        a failed dump can never serve the previous screen's XML, and every
+        result is validated to actually contain nodes.
+
+        A non-zero exit from ``uiautomator dump`` (e.g. "could not get idle
+        state" while a spinner animates) does NOT abort the read — many
+        builds still write the file, so we always try to cat it and accept
+        whatever contains nodes.
         """
         now = time.time()
         if use_cache and self._ui_cache and now - self._ui_cache[0] < _UI_CACHE_TTL:
             return self._ui_cache[1]
+        self._settle_animations()
 
         idx = self.instance.index
         last_err = ""
         for _ in range(retries):
             try:
-                self.adb.shell(idx, ["rm", "-f", _UI_DUMP_PATH],
-                               timeout=15, discover=True)
-                out = self.adb.shell(idx, ["uiautomator", "dump", _UI_DUMP_PATH],
-                                     timeout=45, discover=True)
-                raw = self.adb.exec_out(idx, ["cat", _UI_DUMP_PATH], timeout=30)
+                try:
+                    self.adb.shell(idx, ["rm", "-f", _UI_DUMP_PATH],
+                                   timeout=10, discover=True)
+                except AdbError:
+                    pass
+                try:
+                    out = self.adb.shell(
+                        idx, ["uiautomator", "dump", _UI_DUMP_PATH],
+                        timeout=25, discover=True)
+                except AdbError as exc:
+                    out = str(exc)
+                raw = self.adb.exec_out(idx, ["cat", _UI_DUMP_PATH], timeout=20)
                 xml = raw.decode("utf-8", errors="replace")
                 if "<node" in xml:
                     self._ui_cache = (time.time(), xml)
                     return xml
-                last_err = (out.strip() or xml.strip()
-                            or "dump produced no nodes")
+                lines = out.strip().splitlines()
+                last_err = lines[-1].strip() if lines else "dump had no nodes"
             except Exception as exc:  # noqa: BLE001
                 last_err = str(exc)
-            time.sleep(1.5)
+            time.sleep(1.2)
         raise AutomationError(
             f"uiautomator dump failed after {retries} attempts ({last_err})")
 
