@@ -28,6 +28,7 @@ Requires Cloudflare Worker config in ``config.json``:
 
 from __future__ import annotations
 
+import calendar
 import json
 import random
 import re
@@ -504,7 +505,18 @@ class FacebookFlow:
                 raise AutomationError("date picker did not open")
 
         target_year = time.localtime().tm_year - min_age_years - 1
-        self._scroll_year_wheel_to(target_year)
+        # random calendar date within a legal month length for target year;
+        # month FIRST so the day column has its final row count before the
+        # day wheel is set
+        month = random.randint(1, 12)
+        day = random.randint(1, calendar.monthrange(target_year, month)[1])
+        self.step("birthday_pick",
+                  f"random date {calendar.month_name[month]} "
+                  f"{day}, {target_year}")
+
+        self._scroll_wheel_at(0, month)     # left-most  = month
+        self._scroll_wheel_at(1, day)       # middle    = day
+        self._scroll_wheel_at(-1, target_year)   # right-most = year
 
         set_pos = self._wait_for_text_with_retry(SET_BUTTON, timeout=20)
         self.step("birthday_set", f"clicking Set at {set_pos}")
@@ -523,11 +535,19 @@ class FacebookFlow:
         wheels.sort(key=lambda n: int(n["bounds"].strip("[]").split(",")[0]))
         return wheels
 
+    #: month name -> 1..12, keyed by the first three letters so both
+    #: "Jan" and "January" resolve
+    _MONTH_ABBR: dict[str, int] = {
+        name[:3].lower(): num for num, name in enumerate(
+            calendar.month_name[1:], start=1)}
+
     def _wheel_value(self, wheel: dict) -> int | None:
         """Read the selected (centre) value of one NumberPicker wheel.
 
         The selected item is exposed as an EditText child of the wheel;
-        neighbours are Buttons.
+        neighbours are Buttons. Numeric wheels ("2025", "22") return the
+        number; the month wheel shows names ("Jan") and resolves through
+        :data:`_MONTH_ABBR`.
         """
         b = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", wheel.get("bounds", ""))
         if not b:
@@ -544,45 +564,46 @@ class FacebookFlow:
                 digits = re.sub(r"[^0-9]", "", text)
                 if digits:
                     return int(digits)
+                return self._MONTH_ABBR.get(text.lower()[:3])
         return None
 
-    def _scroll_year_wheel_to(self, target_year: int,
-                              max_steps: int = 120) -> None:
-        """Scroll the right-most wheel until its value equals ``target_year``.
+    def _scroll_wheel_at(self, pos: int, target: int,
+                         timeout: float = 150) -> None:
+        """Bring the wheel at ``pos`` (0 = left-most … -1 = right-most)
+        to ``target``.
 
-        Deterministic strategy: read the wheel, then cover the bulk of the
-        distance with bursts of *gentle* single-row swipes (no re-dump
-        between them — dumping after every row was what made scrolling
-        crawl), and verify per-swipe only on the final approach. Gentle
-        swipes never trigger fling momentum, so the wheel cannot spin
-        past the target. Arrival is confirmed by two identical reads so
-        an animated flyby is never mistaken for success. An unreadable
-        value (mid-animation render) nudges gently instead of freezing.
+        Deterministic strategy shared by month/day/year wheels: read the
+        centre value, cover bulk distance with bursts of *gentle*
+        single-row swipes (no re-dump between rows), verify per-swipe on
+        final approach. Gentle swipes never trigger fling momentum.
+        Wheels are re-located every round because changing the month
+        re-lays-out neighbouring columns. If a burst moves the value
+        AWAY from the target the assumed direction flips automatically,
+        so an unexpected wheel orientation can't cause endless ping-pong.
         """
-        deadline = time.time() + 150
+        deadline = time.time() + timeout
+        invert = False
+        prev_dist: int | None = None
 
-        def geometry(wheel: dict) -> tuple[int, int]:
-            b = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]",
-                         wheel.get("bounds", ""))
-            return ((int(b.group(1)) + int(b.group(3))) // 2,
-                    (int(b.group(2)) + int(b.group(4))) // 2)
-
-        last_seen: int | None = None
-        for _attempt in range(max_steps):
+        while time.time() < deadline:
             self.auto._invalidate_ui()   # fresh dump, never the TTL cache
             wheels = self._picker_wheels()
             if not wheels:
                 raise AutomationError("date picker wheels not found")
-            year_wheel = wheels[-1]      # right-most column = year
-            value = self._wheel_value(year_wheel)
-            x, cy = geometry(year_wheel)
+            wheel = wheels[pos]
+            value = self._wheel_value(wheel)
 
-            if value == target_year:
-                if value == last_seen:
+            b = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]",
+                         wheel.get("bounds", ""))
+            x = (int(b.group(1)) + int(b.group(3))) // 2
+            cy = (int(b.group(2)) + int(b.group(4))) // 2
+
+            if value == target:
+                if prev_dist == 0:
                     self.step("birthday_scroll",
-                              f"year wheel settled on {value}")
+                              f"wheel[{pos}] settled on {value}")
                     return
-                last_seen = value        # first sighting — confirm once
+                prev_dist = 0            # confirm with a second read
                 continue
 
             if value is None:
@@ -591,30 +612,32 @@ class FacebookFlow:
                                 duration_ms=300, wait=0.4)
                 continue
 
-            last_seen = value
-            going_back = value > target_year
+            dist = abs(value - target)
+            # a burst that moved us further away => wrong direction guess
+            if prev_dist is not None and dist > prev_dist + 1:
+                invert = not invert
+                self.step("birthday_scroll",
+                          f"wheel[{pos}] direction flipped")
+                prev_dist = None
+                continue
+            prev_dist = dist
+
+            going_back = (value > target) != invert
             y1, y2 = ((cy - 60, cy + 60) if going_back
                       else (cy + 60, cy - 60))
 
-            if abs(value - target_year) <= 3:
+            if dist <= 3:
                 # final approach: one row per swipe, verified every time
                 self.auto.swipe(x, y1, x, y2, duration_ms=320, wait=0.45)
                 continue
 
             # bulk distance: burst of single-row swipes, then re-read
-            burst = min(abs(value - target_year) - 1, 8)
-            self.step("birthday_scroll",
-                      f"{value} -> {target_year}: bursting {burst} rows "
-                      f"{'back' if going_back else 'forward'}")
+            burst = min(dist - 1, 6)
             for _i in range(burst):
                 self.auto.swipe(x, y1, x, y2, duration_ms=280, wait=0.2)
 
-            if time.time() > deadline:
-                break
-
         raise AutomationError(
-            f"year wheel did not reach {target_year} "
-            f"(last seen {last_seen})")
+            f"wheel[{pos}] did not reach {target} in time")
 
     def _tap_next_if_present(self, timeout: float = 30) -> bool:
         """Tap 'Next' when it shows up; tolerate screens that have none."""
