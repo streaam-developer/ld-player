@@ -486,16 +486,22 @@ class FacebookFlow:
         if not self._date_picker_open():
             self.step("birthday_picker", "opening date picker ...")
             w, h = self.auto.resolution()
-            trigger = (self.auto.find_text("Enter your birthday")
-                       or self.auto.find_text("Birthday"))
-            if trigger:
-                self.auto.tap(*trigger, wait=2)
-            else:
-                self.auto.tap(w // 2, int(h * 0.45), wait=2)
-            if not self._date_picker_open():
-                self.step("birthday_warn",
-                          "picker still not open — trying centre tap")
-                self.auto.tap(w // 2, int(h * 0.45), wait=2)
+            taps: list[tuple[int, int]] = []
+            for label in ("Enter your birthday", "Birthday"):
+                pos = self.auto.find_text(label)
+                if pos:
+                    taps.append(pos)
+            taps.extend(self.auto.find_edit_texts())
+            taps.append((w // 2, int(h * 0.45)))
+
+            opened = False
+            for tx, ty in taps:
+                self.auto.tap(tx, ty, wait=2)
+                if self._date_picker_open():
+                    opened = True
+                    break
+            if not opened:
+                raise AutomationError("date picker did not open")
 
         target_year = time.localtime().tm_year - min_age_years - 1
         self._scroll_year_wheel_to(target_year)
@@ -544,41 +550,47 @@ class FacebookFlow:
                               max_steps: int = 80) -> None:
         """Scroll the right-most wheel until its value equals ``target_year``.
 
-        Each swipe is short (~one row) and the wheel is re-read after every
-        couple of steps, so momentum overshoot gets corrected instead of
-        compounding like long flings do.
+        Two-phase strategy: long multi-row drags while far away, then
+        short single-row nudges for the last stretch. A value is only
+        acted on after two consecutive identical reads, so momentum
+        flybys are never mistaken for arrival.
         """
-        deadline = time.time() + 180
-        for attempt in range(max_steps):
+        deadline = time.time() + 120
+        last_value: int | None = None
+        for _attempt in range(max_steps):
+            self.auto._invalidate_ui()   # fresh read, never the TTL cache
             wheels = self._picker_wheels()
             if not wheels:
                 raise AutomationError("date picker wheels not found")
-            year_wheel = wheels[-1]          # right-most column = year
+            year_wheel = wheels[-1]      # right-most column = year
             value = self._wheel_value(year_wheel)
 
             b = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]",
                          year_wheel.get("bounds", ""))
             x = (int(b.group(1)) + int(b.group(3))) // 2
             cy = (int(b.group(2)) + int(b.group(4))) // 2
+            half_h = max((int(b.group(4)) - int(b.group(2))) // 2, 80)
 
-            if attempt % 2 == 0:             # verify every 2 swipes
+            # two equal reads => the wheel has settled and is safe to act on
+            if value is not None and value == last_value:
                 if value == target_year:
                     self.step("birthday_scroll",
-                              f"year wheel now on {value}")
+                              f"year wheel settled on {value}")
                     return
-                if value is not None:
-                    remaining = abs(value - target_year)
-                    if remaining > 12:
-                        self.step("birthday_scroll",
-                                  f"{value} -> {target_year} "
-                                  f"(~{remaining} rows left)")
-            if value is not None and value == target_year:
-                return
 
-            going_back = value is None or value > target_year
-            # finger downward => smaller values come to centre
-            y1, y2 = (cy - 60, cy + 60) if going_back else (cy + 60, cy - 60)
-            self.auto.swipe(x, y1, x, y2, duration_ms=350, wait=0.35)
+                going_back = value > target_year
+                if abs(value - target_year) > 8:
+                    # coarse: drag most of the wheel height ≈ several rows
+                    dist = int(half_h * 1.4)
+                    dur = 260
+                else:
+                    dist = 60
+                    dur = 350
+                # finger downward => smaller values come to centre
+                y1, y2 = ((cy - dist, cy + dist) if going_back
+                          else (cy + dist, cy - dist))
+                self.auto.swipe(x, y1, x, y2, duration_ms=dur, wait=0.35)
+            last_value = value
 
             if time.time() > deadline:
                 raise AutomationError(
@@ -906,7 +918,9 @@ class FacebookFlow:
         ("confirmation", ("confirmation", "enter the code",
                           "we've sent", "check your email")),
         ("human_block", HUMAN_BLOCK_FRAGMENTS),
-        ("terms", ("I agree", "agree", "privacy policy")),
+        # NB: the *button* only — footer text on other pages says
+        # "...you agree to our Terms..." and must not match here
+        ("terms", ("I agree",)),
         ("password", (PASSWORD_SCREEN_HEADER,)),
         ("email", (EMAIL_SCREEN_HEADER,)),
         ("mobile", (MOBILE_SCREEN_HEADER, SIGN_UP_WITH_EMAIL,
@@ -927,7 +941,7 @@ class FacebookFlow:
                 self.auto._text_nodes(xml)]
 
     def _classify_screen(self, labels: list[str]) -> str:
-        joined = " | ".join(labels)
+        joined = " | ".join(labels).lower()
         for screen_id, fragments in self._SCREEN_MATCHERS:
             if any(f.lower() in joined for f in fragments):
                 return screen_id
@@ -981,6 +995,11 @@ class FacebookFlow:
                 self._dismiss_interstitial_popups(timeout=4)
 
             screen = self._classify_screen(labels)
+            # a DatePicker popup covers the page and hides its texts —
+            # its wheels carry no 'birthday' wording, so classify by the
+            # popup itself, never by what is visible underneath
+            if self._date_picker_open():
+                screen = "birthday"
             attempts[screen] = attempts.get(screen, 0) + 1
             self.step("screen", f"on '{screen}' screen "
                       f"(visit {attempts[screen]})")
@@ -1050,7 +1069,10 @@ class FacebookFlow:
                         stall += 1
                         self.step("stall",
                                   f"unrecognised screen ({stall} consecutive)")
-                        if stall % 5 == 0:
+                        # BACK would close an open DatePicker popup — the
+                        # birthday handler needs it, so never press it here
+                        if (stall % 5 == 0
+                                and not self._date_picker_open()):
                             self.auto.back()
                             time.sleep(1.5)
                         time.sleep(2)
