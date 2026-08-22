@@ -30,6 +30,7 @@ import json
 import random
 import re
 import string
+import subprocess
 import threading
 import time
 
@@ -864,53 +865,73 @@ class OutlookFlow(AppSearchFlow):
 
     def _hold_button_until_page_changes(self, labels: list[str],
                                         timeout: float) -> None:
-        """Press-and-HOLD the challenge button until the page moves on.
+        """Keep a finger pressed on the button CONTINUOUSLY until the page
+        moves on.
 
-        The hold is a swipe-in-place with a long duration (the closest adb
-        equivalent to keeping a finger pressed). The page is considered
-        passed once 'protect your account' shows up or every HUMAN_FRAGMENT
-        has been absent for MANUAL_MISS_POLLS consecutive polls."""
-        start = time.time()
-        misses = 0          # polls without any HUMAN fragment
-        not_found = 0       # polls without the button itself
-        presses = 0
+        A raw ``adb shell input swipe x y x y <long>`` runs as its own
+        process, so the touch NEVER lifts between polls (short repeated
+        holds reset the challenge progress). This thread only watches the
+        screen; when 'protect your account' appears — or every
+        HUMAN_FRAGMENT has been gone for MANUAL_MISS_POLLS polls — the
+        press is released by terminating the swipe process. Deliberately
+        no scrolling here: lifting to scroll would fail the challenge."""
+        deadline = time.time() + timeout
+        proc: subprocess.Popen | None = None
         last_tick = time.time()
-        while time.time() - start < timeout:
-            joined = self.screen_text()
-            if any(f.lower() in joined for f in PROTECT_FRAGMENTS):
-                self.step("human_done",
-                          "'protect your account' appeared — puzzle passed")
-                return
-            if not any(f.lower() in joined for f in HUMAN_FRAGMENTS):
-                misses += 1
-                if misses >= MANUAL_MISS_POLLS:
+        misses = 0
+
+        def spawn_press(px: int, py: int, ms: int) -> subprocess.Popen:
+            adb = self.auto.adb
+            cmd = [adb.adb, "-s", adb._serial(self.inst.index),
+                   "shell", "input", "swipe",
+                   str(px), str(py), str(px), str(py), str(ms)]
+            return subprocess.Popen(cmd)
+
+        try:
+            while time.time() < deadline:
+                joined = self.screen_text()
+                if any(f.lower() in joined for f in PROTECT_FRAGMENTS):
                     self.step("human_done",
-                              "puzzle page gone — assuming it was passed")
+                              "'protect your account' appeared — "
+                              "puzzle passed")
                     return
-            else:
-                misses = 0
+                if not any(f.lower() in joined for f in HUMAN_FRAGMENTS):
+                    misses += 1
+                    if misses >= MANUAL_MISS_POLLS:
+                        self.step("human_done",
+                                  "puzzle page gone — assuming it was "
+                                  "passed")
+                        return
+                else:
+                    misses = 0
 
-            pos = self._find_any_button(labels)
-            if pos:
-                not_found = 0
-                presses += 1
-                if presses % 5 == 1:
-                    self.step("human_hold", f"hold #{presses} at {pos}")
-                # long-press = swipe from the point onto itself, slowly
-                self.auto.swipe(pos[0], pos[1], pos[0], pos[1],
-                                duration_ms=1500, wait=1.2)
-            else:
-                not_found += 1
-                if not_found % 6 == 3:
-                    # button may sit below the fold — nudge the page down
-                    self.auto.scroll_down()
+                if proc is None or proc.poll() is not None:
+                    # previous press ended — re-locate and press again
+                    pos = self._find_any_button(labels)
+                    if pos:
+                        remaining_ms = int((deadline - time.time()) * 1000)
+                        proc = spawn_press(pos[0], pos[1],
+                                           min(remaining_ms, 300_000))
+                        self.step("human_hold",
+                                  f"finger down at {pos} — holding until "
+                                  f"the page changes")
+                    # button missing → just wait; scrolling would lift
+                    # the finger and reset the challenge
 
-            now = time.time()
-            if now - last_tick >= 20:
-                last_tick = now
-                print(f"  [{self.inst.name}] ... still holding "
-                      f"({timeout - (now - start):.0f}s left)", flush=True)
-            time.sleep(1.0)
+                now = time.time()
+                if now - last_tick >= 20:
+                    last_tick = now
+                    print(f"  [{self.inst.name}] ... holding continuously "
+                          f"({deadline - now:.0f}s left)", flush=True)
+                time.sleep(2.0)
+        finally:
+            # release the finger on any exit path
+            if proc is not None and proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
         raise AutomationError(
             f"timed out holding '{labels[0]}' ({timeout:.0f}s)")
 
