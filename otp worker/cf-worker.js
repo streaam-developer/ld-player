@@ -66,6 +66,33 @@ export default {
         code = m[1];
         console.log(`Code ${code} taken from body for ${recipient}`);
       }
+
+      // Microsoft security codes (Outlook signup): usually FOUR digits,
+      // e.g. subject "Microsoft account security code: 4821" or body
+      // "Use 4821 as Microsoft account security code". Only consulted when
+      // no 5-digit Facebook code matched, and only for Microsoft mail, so
+      // Facebook behaviour stays untouched. The \d{4,8} lookarounds can
+      // never swallow the 13-digit DKIM/ARC timestamps.
+      if (!code) {
+        const from = (message.from || "").toLowerCase();
+        const subjLow = subject.toLowerCase();
+        const isMicrosoft =
+          from.includes("microsoft") || from.includes("account-security") ||
+          subjLow.includes("microsoft") || subjLow.includes("security code");
+        if (isMicrosoft) {
+          // covers both word orders:
+          //   "Security code: 7731"           -> code BEFORE digits
+          //   "Use 4821 as ... security code" -> digits BEFORE code
+          const msBody =
+              body.match(/code[^0-9]{0,30}(?<!\d)(\d{4,8})(?!\d)/i)
+           || body.match(/(?<!\d)(\d{4,8})(?!\d)[^\n]{0,80}\bcode\b/i);
+          const msSubj = subject.match(/(?<!\d)(\d{4,8})(?!\d)/);
+          code = (msBody && msBody[1]) || (msSubj && msSubj[1]) || null;
+          if (code) {
+            console.log(`Microsoft code ${code} for ${recipient}`);
+          }
+        }
+      }
     }
 
     if (!code) {

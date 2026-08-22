@@ -38,12 +38,11 @@ from pathlib import Path
 from .adb import Adb
 from .appsearch import DEFAULT_LABEL, DEFAULT_PACKAGE, AppSearchError, \
     AppSearchFlow
-from .automation import Automator, AutomationError, Waiter
+from .automation import AutomationError, Waiter
 from .config import load_config
 from .console import LdConsole, LdConsoleError
 from .device import apply_profile
 from .email_otp import fetch_otp, OtpTimeout
-from .instance import Instance
 
 
 START_URL = "https://outlook.office.com/mail/"

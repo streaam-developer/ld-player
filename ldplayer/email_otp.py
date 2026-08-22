@@ -83,7 +83,7 @@ def fetch_otp(worker_url: str, api_key: str, email: str, *,
             print(f"  ... polling OTP for {email} "
                   f"({elapsed:.0f}/{timeout:.0f}s)", flush=True)
 
-        code = _poll_once(url, api_key)
+        code = _poll_once(url, api_key, shape)
         if code:
             print(f"  [otp] received code for {email}: {code}", flush=True)
             return code
@@ -91,7 +91,8 @@ def fetch_otp(worker_url: str, api_key: str, email: str, *,
         time.sleep(poll)
 
 
-def _poll_once(url: str, api_key: str) -> str | None:
+def _poll_once(url: str, api_key: str,
+               shape: "re.Pattern[str]" = OTP_SHAPE) -> str | None:
     """Make a single GET request.  Returns the code or ``None``."""
     req = urllib.request.Request(
         url,
@@ -106,12 +107,12 @@ def _poll_once(url: str, api_key: str) -> str | None:
             data = json.loads(resp.read().decode())
             if resp.status == 200 and "code" in data:
                 code = str(data["code"])
-                if not OTP_SHAPE.fullmatch(code):
+                if not shape.fullmatch(code):
                     # bogus/stale record (e.g. digits lifted from a DKIM
                     # timestamp) — ignore it and keep waiting; the worker
                     # purges stale records after 3 minutes.
                     print(f"  [otp] ignoring malformed code {code!r} "
-                          f"(expected 5 digits)", flush=True)
+                          f"(expected {shape.pattern})", flush=True)
                     return None
                 return code
             return None
