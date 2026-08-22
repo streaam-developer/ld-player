@@ -72,7 +72,7 @@ NEXT_BUTTONS = ["Next"]
 CREATE_ONE = "Create one"
 
 #: fragments identifying each Microsoft signup screen (lower-case)
-PASSWORD_HEADER = "create a password"
+PASSWORD_HEADERS = ["create your password", "create a password"]
 NAME_FRAGMENTS = ["first name", "last name", "add your name"]
 BIRTHDAY_HINTS = ("Month", "Day", "Year")
 HUMAN_FRAGMENTS = ["prove you're human", "prove you’re human", "puzzle",
@@ -541,9 +541,9 @@ class OutlookFlow(AppSearchFlow):
 
     def enter_password(self, password: str | None = None,
                        timeout: float = 60) -> None:
-        """Wait for 'Create a password', fill a strong one, Next."""
-        self.step("password", f"waiting for '{PASSWORD_HEADER}' page ...")
-        self._wait_for_any_text([PASSWORD_HEADER], timeout)
+        """Wait for the 'Create your password' page, fill a strong one, Next."""
+        self.step("password", f"waiting for '{PASSWORD_HEADERS[0]}' page ...")
+        self._wait_for_any_text(PASSWORD_HEADERS, timeout)
         time.sleep(1.0)
 
         self.password = password or random_password()
