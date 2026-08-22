@@ -995,24 +995,73 @@ class OutlookFlow(AppSearchFlow):
         self._type_into_field(code, f"verification code {code}")
         self._tap_next(timeout)
 
+    def _chrome_foreground(self) -> bool:
+        """True when Chrome's activity is currently in the foreground."""
+        try:
+            act = self.auto.focused_activity() or ""
+        except Exception:  # noqa: BLE001
+            return False
+        return self.package in act
+
+    def _ensure_chrome_foreground(self, timeout: float = 30) -> None:
+        """Bring Chrome to the front — RELAUNCHING it when Android or
+        LDPlayer's memory manager killed the background process (which
+        happens regularly while Facebook sits on top)."""
+        deadline = time.time() + timeout
+        launches = 0
+        while time.time() < deadline:
+            if self._chrome_foreground():
+                return
+            launches += 1
+            self.step("chrome_revive",
+                      f"Chrome is not in the foreground (attempt "
+                      f"{launches}) — reopening ...")
+            try:
+                self.inst.run_app(self.package)
+            except Exception:  # noqa: BLE001
+                pass
+            time.sleep(3.0)
+            if self._chrome_foreground():
+                return
+            if launches % 2 == 0:
+                # stubborn — try the monkey-style direct launch too
+                try:
+                    self.direct_launch()
+                except Exception:  # noqa: BLE001
+                    pass
+                time.sleep(3.0)
+        raise AutomationError(
+            f"{self.package} would not come to the foreground within "
+            f"{timeout:.0f}s")
+
     def read_facebook_otp_from_outlook(self, timeout: float = 240) -> str:
         """Open the still-signed-in Outlook inbox in Chrome and extract
         Facebook's confirmation code from the newest mail.
 
         Used by signup_flow.py: Facebook mails its code to the freshly
         created @outlook.com address, which the Cloudflare Worker never
-        sees — so we simply walk back to the webmail and read it."""
+        sees — so we simply walk back to the webmail and read it. Chrome
+        is monitored through the whole read: if the OS kills it while it
+        sits behind Facebook, it is detected and reopened."""
         self.step("otp_mail",
                   "opening the Outlook inbox to look for Facebook's "
                   "code ...")
-        # Chrome may not be foreground anymore (Facebook is) — bring it up
-        self.inst.run_app(self.package)
-        time.sleep(2.5)
+        self._ensure_chrome_foreground(30)
 
         deadline = time.time() + timeout
         last_nav = 0.0
         opened_row = False
+        last_fg_check = 0.0
         while time.time() < deadline:
+            # Chrome can be killed at ANY moment while Facebook is
+            # running — detect and revive before touching the UI
+            if time.time() - last_fg_check >= 8:
+                last_fg_check = time.time()
+                if not self._chrome_foreground():
+                    self._ensure_chrome_foreground(30)
+                    last_nav = 0.0          # force a fresh page load
+                    opened_row = False
+
             # periodically reload the inbox so fresh mail shows up
             if time.time() - last_nav >= 30:
                 try:

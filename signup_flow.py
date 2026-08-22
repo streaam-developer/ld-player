@@ -43,6 +43,44 @@ from ldplayer.facebook import FacebookFlow, find_facebook_apk
 from ldplayer.outlook import (FIRST_NAMES, LAST_NAMES, OutlookFlow,
                               create_signup_instance, new_instance_name)
 
+CHROME_PACKAGE = "com.android.chrome"
+FB_PACKAGE = "com.facebook.katana"
+
+
+def _keep_alive(adb: Adb, index: int) -> None:
+    """Best-effort: pin Chrome + Facebook into Android's 'active' standby
+    bucket so the memory manager stops killing them while they sit in the
+    background (Chrome used to get killed mid-signup)."""
+    for pkg in (CHROME_PACKAGE, FB_PACKAGE):
+        try:
+            adb.shell(index, ["am", "set-standby-bucket", pkg, "active"],
+                      timeout=15, discover=True)
+            print(f"[{index}] {pkg} pinned to the active bucket",
+                  flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[{index}] could not pin {pkg} ({exc}) — continuing",
+                  flush=True)
+
+
+def _wait_foreground(flow, package: str, timeout: float = 20) -> bool:
+    """Poll until `package` is the foreground app; relaunch on failure."""
+    deadline = time.time() + timeout
+    tries = 0
+    while time.time() < deadline:
+        try:
+            act = flow.auto.focused_activity() or ""
+        except Exception:  # noqa: BLE001
+            act = ""
+        if package in act:
+            return True
+        tries += 1
+        try:
+            flow.inst.run_app(package)
+        except Exception:  # noqa: BLE001
+            pass
+        time.sleep(3.0)
+    return False
+
 
 def main() -> int:
     if hasattr(sys.stdout, "reconfigure"):
@@ -101,6 +139,9 @@ def main() -> int:
             print(f"[{name}] PHASE 1/2 — new instance created "
                   f"(4 CPU / 4 GB), starting OUTLOOK signup ...", flush=True)
 
+        index = inst.index if index is None else index
+        _keep_alive(adb, index)
+
         oflow = OutlookFlow(console, adb, index=index, name=name,
                             cf_worker_url=cfg.get("cf_worker_url", ""),
                             cf_worker_api_key=cfg.get("cf_worker_api_key", ""))
@@ -132,8 +173,11 @@ def main() -> int:
                 timeout=args.fb_otp_timeout)
             print(f"[{oflow.inst.name}] hopping back into Facebook ...",
                   flush=True)
-            fflow.inst.run_app(fflow.package)
-            time.sleep(4)
+            if not _wait_foreground(fflow, FB_PACKAGE, timeout=20):
+                print(f"[{oflow.inst.name}] WARN: Facebook would not come "
+                      f"to the foreground — trying once more", flush=True)
+                _wait_foreground(fflow, FB_PACKAGE, timeout=15)
+            time.sleep(2)
             return code
 
         fflow._otp_provider = otp_provider
