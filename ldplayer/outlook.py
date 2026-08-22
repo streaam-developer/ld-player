@@ -769,14 +769,29 @@ class OutlookFlow(AppSearchFlow):
 
     def wait_human_verification(self, timeout: float = MANUAL_WAIT_TIMEOUT
                                 ) -> None:
-        """'Let's prove you're human' — WAIT until YOU solve the puzzle."""
+        """'Let's prove you're human' page.
+
+        You TYPE the name of the button shown by the challenge in the
+        console; the script then press-and-HOLDS it over and over until
+        the page moves on. Leave the prompt empty to solve the puzzle
+        fully by hand instead."""
         self.step("human", "waiting for the human-verification page ...")
         self._wait_for_any_text(HUMAN_FRAGMENTS, timeout=120)
-        self._manual_banner([
-            "ACTION NEEDED — the puzzle page is showing in the emulator.",
-            "Solve the 'prove you're human' challenge by hand.",
-            "This script resumes automatically once you pass it.",
-        ])
+
+        print(flush=True)
+        print("=" * 66, flush=True)
+        print(f"  [{self.inst.name}] HUMAN VERIFICATION page detected.",
+              flush=True)
+        button = input(
+            f"  [{self.inst.name}] Type the BUTTON NAME to hold "
+            f"(empty = solve by hand): ").strip()
+        print("=" * 66, flush=True)
+
+        if button:
+            self._hold_button_until_page_changes(button, timeout)
+            return
+
+        # ------------------------------------------------ fully manual path
         self.step("human_wait",
                   f"waiting for YOU to finish the puzzle "
                   f"(up to {timeout:.0f}s)...")
@@ -808,6 +823,62 @@ class OutlookFlow(AppSearchFlow):
         raise AutomationError(
             f"timed out waiting for manual human verification "
             f"({timeout:.0f}s)")
+
+    def _hold_button_until_page_changes(self, label: str,
+                                        timeout: float) -> None:
+        """Press-and-HOLD `label` repeatedly until the challenge page goes.
+
+        The hold is a swipe-in-place with a long duration (the closest adb
+        equivalent to keeping a finger pressed). The page is considered
+        passed once 'protect your account' shows up or every HUMAN_FRAGMENT
+        has been absent for MANUAL_MISS_POLLS consecutive polls."""
+        self.step("human_hold",
+                  f"press-and-hold '{label}' until the page changes "
+                  f"(up to {timeout:.0f}s)...")
+        start = time.time()
+        misses = 0          # polls without any HUMAN fragment
+        not_found = 0       # polls without the button itself
+        presses = 0
+        last_tick = time.time()
+        while time.time() - start < timeout:
+            joined = self.screen_text()
+            if any(f.lower() in joined for f in PROTECT_FRAGMENTS):
+                self.step("human_done",
+                          "'protect your account' appeared — puzzle passed")
+                return
+            if not any(f.lower() in joined for f in HUMAN_FRAGMENTS):
+                misses += 1
+                if misses >= MANUAL_MISS_POLLS:
+                    self.step("human_done",
+                              "puzzle page gone — assuming it was passed")
+                    return
+            else:
+                misses = 0
+
+            pos = self.auto.find_text(label)
+            if pos:
+                not_found = 0
+                presses += 1
+                if presses % 5 == 1:
+                    self.step("human_hold",
+                              f"hold #{presses} at {pos}")
+                # long-press = swipe from the point onto itself, slowly
+                self.auto.swipe(pos[0], pos[1], pos[0], pos[1],
+                                duration_ms=1500, wait=1.2)
+            else:
+                not_found += 1
+                if not_found % 6 == 3:
+                    # button may sit below the fold — nudge the page down
+                    self.auto.scroll_down()
+
+            now = time.time()
+            if now - last_tick >= 20:
+                last_tick = now
+                print(f"  [{self.inst.name}] ... still holding '{label}' "
+                      f"({timeout - (now - start):.0f}s left)", flush=True)
+            time.sleep(1.0)
+        raise AutomationError(
+            f"timed out holding '{label}' ({timeout:.0f}s)")
 
     def protect_account(self, recovery_email: str | None = None,
                         timeout: float = 90) -> None:
