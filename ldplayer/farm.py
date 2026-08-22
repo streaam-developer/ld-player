@@ -51,7 +51,7 @@ LAST_NAMES = ["Johnson", "Smith", "Brown", "Miller", "Davis", "Wilson",
 
 class SignupFarm:
     def __init__(self, console: LdConsole, adb: Adb,
-                 workers: int = 3,
+                 workers: int = 2,
                  accounts: int = 0,
                  package: str = "com.facebook.katana",
                  apk_path: str | None = None,
