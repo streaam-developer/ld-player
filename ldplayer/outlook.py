@@ -842,11 +842,24 @@ class OutlookFlow(AppSearchFlow):
 
     def _find_any_button(self,
                          labels: list[str]) -> tuple[int, int] | None:
-        """First on-screen match among `labels` (substring search)."""
-        for lbl in labels:
-            pos = self.auto.find_text(lbl)
-            if pos:
-                return pos
+        """Center of a CLICKABLE node whose label matches one of `labels`.
+
+        Strictly buttons only: the challenge page also carries a plain
+        CAPTION reading 'press & hold' — holding that text does nothing.
+        Unlike Automator.find_text there is deliberately no fallback to
+        non-clickable labels."""
+        try:
+            xml = self.auto.dump_ui()
+        except Exception:  # noqa: BLE001
+            return None
+        wanted = [w.lower() for w in labels]
+        for label, cx, cy, clickable in self.auto._text_nodes(xml):
+            if not clickable:
+                continue
+            low = label.lower()
+            for want in wanted:
+                if want in low:
+                    return cx, cy
         return None
 
     def _hold_button_until_page_changes(self, labels: list[str],
