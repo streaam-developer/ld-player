@@ -45,12 +45,16 @@ SETTINGS_FILE = ROOT / "ld_settings.json"
 
 #: keys never copied from a settings template onto new instances:
 #: identity must stay random per instance, adb must stay ON for the
-#: automation, and windows should not all pile up at the same spot
+#: automation, windows should not pile up at one spot, and above all
+#: playerName IS the instance's unique name in leidianN.config —
+#: copying the template's empty one makes LDPlayer rename/reset the
+#: instance and every later find-by-name fails
 _IDENTITY_PREFIX = "propertySettings."
 _SETTINGS_SKIP_KEYS = {
     "basicSettings.adbDebug",
     "basicSettings.left",
     "basicSettings.top",
+    "statusSettings.playerName",
 }
 
 #: prefix marking instances owned by this tool — only these ever get deleted
@@ -275,12 +279,13 @@ class SignupFarm:
                 "instance list")
         return inst.index, inst.name
 
-    def _apply_settings(self, index: int) -> bool:
+    def _apply_settings(self, index: int, instance_name: str = "") -> bool:
         """Overlay the settings template (ld_settings.json) onto an instance.
 
         Copies every key except per-instance identity (IMEI/IMSI/MAC/model/
-        ... stays random), forces adbDebug back ON, and leaves window
-        position to LDPlayer. Must run while the instance is STOPPED.
+        ... stays random), forces adbDebug back ON, preserves the instance's
+        own name, and leaves window position to LDPlayer. Must run while the
+        instance is STOPPED.
         """
         if not self.settings_file or not self.settings_file.is_file():
             return False
@@ -301,12 +306,16 @@ class SignupFarm:
                 data[key] = value
                 copied += 1
             data["basicSettings.adbDebug"] = 1
+            # the instance name is its identity — never let a template
+            # clobber it (an empty/wrong one makes every find-by-name fail)
+            if instance_name:
+                data["statusSettings.playerName"] = instance_name
             tmp = cfg_file.with_suffix(".tmp")
             tmp.write_text(json.dumps(data, indent=4, ensure_ascii=False),
                            encoding="utf-8")
             tmp.replace(cfg_file)
             self._log(f"applied {copied} settings from "
-                      f"{self.settings_file.name} to leidian{index}")
+                      f"{self.settings_file.name} to {instance_name or f'leidian{index}'}")
             return True
         except (OSError, ValueError) as exc:
             self._log(f"could not apply settings template to "
@@ -356,7 +365,7 @@ class SignupFarm:
             self._fix_window_shape(inst.index)
             # then give it the saved settings template (CPU/RAM, fps,
             # window geometry, ...) — identity stays random
-            self._apply_settings(inst.index)
+            self._apply_settings(inst.index, instance_name=name)
             mode = "cloned from template" if self._template_target else \
                 "created blank"
             self._log(f"{mode} '{name}' (index {inst.index}) — "

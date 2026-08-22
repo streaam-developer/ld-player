@@ -1,6 +1,5 @@
 {
     "statusSettings.isNewPlayer": true,
-    "statusSettings.playerName": "",
     "basicSettings.verticalSync": false,
     "advancedSettings.resolution": {
         "width": 720,
