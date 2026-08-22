@@ -82,6 +82,29 @@ def _wait_foreground(flow, package: str, timeout: float = 20) -> bool:
     return False
 
 
+def _discard_instance(console: LdConsole, inst) -> None:
+    """Close the emulator and DELETE the instance together with ALL its
+    data — used when Facebook blocks the signup ('use your account')."""
+    name = inst.name
+    print(f"[{name}] closing the instance ...", flush=True)
+    try:
+        console.quit(index=inst.index)
+        console.wait_until_quit(index=inst.index, timeout=120, poll=2.0)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[{name}] quit warning: {exc}", flush=True)
+    print(f"[{name}] deleting the instance with all its data ...",
+          flush=True)
+    try:
+        res = console.remove(index=inst.index)
+        if getattr(res, "ok", True):
+            print(f"[{name}] instance wiped from disk", flush=True)
+        else:
+            print(f"[{name}] remove failed: {res.text or res.stderr}",
+                  flush=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[{name}] remove failed: {exc}", flush=True)
+
+
 def main() -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(line_buffering=True)
@@ -203,6 +226,10 @@ def main() -> int:
             print(f"\n[{oflow.inst.name}] facebook phase finished with "
                   f"status '{fflow.success or 'error'}' — check the log "
                   f"above.", flush=True)
+            if fflow.success == "blocked":
+                # 'use your account' / human-verification block: this
+                # instance is burned — close it and wipe all its data
+                _discard_instance(console, oflow.inst)
             return 1
 
         print(f"[{oflow.inst.name}] Instance stays open — Ctrl+C to stop.",
