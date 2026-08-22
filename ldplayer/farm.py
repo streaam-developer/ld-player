@@ -136,6 +136,34 @@ class SignupFarm:
             if not self.console.find(name=name):
                 return name
 
+    def _enable_adb(self, index: int) -> bool:
+        """Turn on ``adbDebug`` in the instance config before first launch.
+
+        Freshly created instances inherit the LDPlayer GUI's global default,
+        which may have ADB debugging OFF (``basicSettings.adbDebug: 0``) —
+        then adbd never starts inside the guest, every adb port refuses
+        connections, and boot-wait hangs forever even though Android itself
+        boots fine. The flag is only read at VM start, so writing it here
+        (instance stopped) takes effect on the very next launch.
+        """
+        vms = self._vms_root()
+        cfg_file = vms / "config" / f"leidian{index}.config" if vms else None
+        if not cfg_file or not cfg_file.is_file():
+            return False
+        try:
+            data = json.loads(cfg_file.read_text(encoding="utf-8"))
+            if data.get("basicSettings.adbDebug") == 1:
+                return True
+            data["basicSettings.adbDebug"] = 1
+            tmp = cfg_file.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data, indent=4, ensure_ascii=False),
+                           encoding="utf-8")
+            tmp.replace(cfg_file)
+            return True
+        except (OSError, json.JSONDecodeError) as exc:
+            self._log(f"could not enable adb on leidian{index}: {exc}")
+            return False
+
     def _create_instance(self, name: str) -> int:
         """Create + randomise device settings. Returns the instance index."""
         with self._create_lock:
@@ -153,7 +181,12 @@ class SignupFarm:
             if not self._instance_files_ok(inst.index):
                 raise RuntimeError(
                     f"instance '{name}' was created incompletely "
-                    "(leidian.vbox missing) — discarding it")
+                    "(config/vmdk missing) — discarding it")
+            # ADB debugging must be ON or the automation can never attach
+            if not self._enable_adb(inst.index):
+                raise RuntimeError(
+                    f"could not enable adbDebug on '{name}' "
+                    f"(index {inst.index}) — discarding it")
             self._log(f"created '{name}' (index {inst.index}) — "
                       f"random mobile: {profile.summary()}")
             return inst.index

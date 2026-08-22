@@ -89,8 +89,9 @@ def main() -> int:
                         "'Create new account' tap")
     p.add_argument("--no-grant", action="store_true",
                    help="skip pre-granting contacts/location permissions")
-    p.add_argument("--boot-timeout", type=int, default=600,
-                   help="seconds to wait for boot + launcher")
+    p.add_argument("--boot-timeout", type=int, default=900,
+                   help="seconds to wait for boot + launcher (first boot of "
+                        "a fresh instance is slow; 3 at once slower still)")
     p.add_argument("--first-name",
                    help="fixed first name (auto mode picks random names "
                         "when omitted)")
