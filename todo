@@ -1,1 +1,2 @@
-now i want to that outlook.py and signup_flow files works together
+now i want to that outlook.py and signup_flow.py files works together
+like first it create outlook then it comeback to homepage and install facebook apk and process everything and when ask email then enter outlook generate email to their and when ask otp then it open back outlook and file all mails that contain otp and enter to facebook and fix succesfull accound created then enter email and password of facebook to facebook.txt and outlook to outlook.txt 

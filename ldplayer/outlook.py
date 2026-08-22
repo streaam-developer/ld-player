@@ -99,9 +99,14 @@ USERNAME_TAKEN_FRAGMENTS = ["already has that username", "try another",
 MANUAL_WAIT_TIMEOUT = 1800.0
 MANUAL_MISS_POLLS = 6
 
-#: the challenge's hold-button label variants ("press and hold"), tried
-#: in order — find_text is a substring match so the first hit wins
-HUMAN_HOLD_BUTTONS = ["Press & Hold", "Press and hold", "Hold"]
+#: EXACT labels the challenge's hold control must carry (case-insensitive;
+#: "&" is also probed in its XML-escaped &amp; form automatically).
+#: Substring captions anywhere else on the page are deliberately ignored.
+HUMAN_HOLD_BUTTONS = ["Press and hold", "Press & Hold"]
+
+#: one continuous press lasts at most this long before the locator
+#: re-scans and (if needed) tries the next candidate point
+_HOLD_PRESS_MS = 30_000
 
 FIRST_NAMES = ["Alex", "Jordan", "Taylor", "Casey", "Morgan", "Riley",
                "Jamie", "Drew", "Robin", "Skyler", "Aiden", "Leo", "Nina",
@@ -188,7 +193,9 @@ def create_signup_instance(console: LdConsole, name: str,
     if not inst:
         raise OutlookError(f"create failed: {res.text or res.stderr}")
 
-    profile = apply_profile(console, name=name)
+    # signup instances get extra headroom: 4 CPU cores + 4 GB RAM so
+    # Chrome + the heavy Outlook web app stay responsive
+    profile = apply_profile(console, name=name, cpu=4, memory=4096)
     adb_ok = _enable_adb(inst.index)
     print(f"[{name}] fresh instance ready (index {inst.index}, "
           f"{'cloned from ' + src.name if src else 'blank'}) — "
@@ -774,94 +781,89 @@ class OutlookFlow(AppSearchFlow):
 
     def wait_human_verification(self, timeout: float = MANUAL_WAIT_TIMEOUT
                                 ) -> None:
-        """'Let's prove you're human' page.
+        """'Let's prove you're human' page — fully automatic.
 
-        The challenge's 'press and hold' button is held down repeatedly
-        (adb long-press) until the page moves on. If the button cannot be
-        located, the console asks for its label or falls back to fully
-        manual solving."""
+        The challenge's 'press & hold' control is held down CONTINUOUSLY
+        until the page moves on. Such widgets often render on a canvas or
+        inside a WebView that never marks the button clickable, so the
+        locator falls through ranked strategies (clickable node -> matching
+        label -> label nudged down -> geometric default). No manual input."""
         self.step("human", "waiting for the human-verification page ...")
         self._wait_for_any_text(HUMAN_FRAGMENTS, timeout=120)
         self.step("human_hold",
-                  f"challenge detected — holding '{HUMAN_HOLD_BUTTONS[0]}'...")
+                  "challenge detected — starting continuous hold ...")
+        self._hold_button_until_page_changes(HUMAN_HOLD_BUTTONS, timeout)
 
-        # give the hold-button a short grace period to render before
-        # bothering the user
-        pos = None
-        for _ in range(10):
-            pos = self._find_any_button(HUMAN_HOLD_BUTTONS)
-            if pos:
-                break
-            time.sleep(1.0)
+    def _hold_candidates(self,
+                         labels: list[str]
+                         ) -> list[tuple[str, tuple[int, int]]]:
+        """STRICT locator for the challenge hold control.
 
-        if pos:
-            self._hold_button_until_page_changes(HUMAN_HOLD_BUTTONS, timeout)
-            return
+        A node qualifies only when its text or content-desc EQUALS one of
+        `labels` (case-insensitive; the XML-escaped "&" form is probed
+        too). Random captions that merely CONTAIN the words are ignored —
+        pressing plain text does nothing. Hidden controls count as well:
+        Button-class nodes or resource-ids mentioning hold/press are
+        picked up even without matching text.
 
-        # ------------------------------------------------ interactive fallback
-        self._manual_banner([
-            "ACTION NEEDED — puzzle page is showing but the hold-button",
-            f"({HUMAN_HOLD_BUTTONS[0]} / {HUMAN_HOLD_BUTTONS[1]}) was not found.",
-            "Type the exact BUTTON LABEL to hold (empty = solve by hand):",
-        ])
-        button = input(f"  [{self.inst.name}] button to hold: ").strip()
-        if button:
-            self._hold_button_until_page_changes([button], timeout)
-            return
-
-        self.step("human_wait",
-                  f"waiting for YOU to finish the puzzle "
-                  f"(up to {timeout:.0f}s)...")
-
-        start = time.time()
-        misses = 0
-        last_tick = time.time()
-        while time.time() - start < timeout:
-            joined = self.screen_text()
-            if any(f.lower() in joined for f in PROTECT_FRAGMENTS):
-                self.step("human_done",
-                          "'protect your account' appeared — puzzle passed")
-                return
-            if not any(f.lower() in joined for f in HUMAN_FRAGMENTS):
-                misses += 1
-                if misses >= MANUAL_MISS_POLLS:
-                    self.step("human_done",
-                              "puzzle page gone — assuming it was passed")
-                    return
-            else:
-                misses = 0
-            now = time.time()
-            if now - last_tick >= 20:
-                last_tick = now
-                print(f"  [{self.inst.name}] ... still waiting for you to "
-                      f"solve the puzzle ({timeout - (now - start):.0f}s "
-                      f"left)", flush=True)
-            time.sleep(2.0)
-        raise AutomationError(
-            f"timed out waiting for manual human verification "
-            f"({timeout:.0f}s)")
-
-    def _find_any_button(self,
-                         labels: list[str]) -> tuple[int, int] | None:
-        """Center of a CLICKABLE node whose label matches one of `labels`.
-
-        Strictly buttons only: the challenge page also carries a plain
-        CAPTION reading 'press & hold' — holding that text does nothing.
-        Unlike Automator.find_text there is deliberately no fallback to
-        non-clickable labels."""
+        Ranked press-points, most likely first:
+          button     clickable node with the exact label   (real button)
+          text       exact label, not clickable            (label rendered
+                     inside the touch target)
+          text+pad   same point nudged ~6% screen height down (pad under
+                     the text inside a taller pill)
+          hidden     no exact text, but resource-id/class identifies it
+                     as the hold button
+        """
+        w, h = self.auto.resolution()
+        wanted: set[str] = set()
+        for lbl in labels:
+            low = lbl.strip().lower()
+            wanted.add(low)
+            wanted.add(low.replace("&", "&amp;"))
         try:
             xml = self.auto.dump_ui()
         except Exception:  # noqa: BLE001
-            return None
-        wanted = [w.lower() for w in labels]
-        for label, cx, cy, clickable in self.auto._text_nodes(xml):
-            if not clickable:
+            xml = ""
+
+        ranked: dict[str, tuple[int, int]] = {}
+        for node in self.auto._all_nodes(xml):
+            txt = (node.get("text") or "").strip().lower()
+            desc = (node.get("content-desc") or "").strip().lower()
+            rid = (node.get("resource-id") or "").lower()
+            cls = (node.get("class") or "").lower()
+            clickable = node.get("clickable") == "true"
+            m = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]",
+                         node.get("bounds", ""))
+            if not m:
                 continue
-            low = label.lower()
-            for want in wanted:
-                if want in low:
-                    return cx, cy
-        return None
+            x1, y1, x2, y2 = map(int, m.groups())
+            if x2 <= x1 or y2 <= y1:
+                continue          # zero-size / hidden stub nodes
+            cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+
+            exact = txt in wanted or desc in wanted
+            if exact and clickable and "button" not in ranked:
+                ranked["button"] = (cx, cy)
+            if exact:
+                if "text" not in ranked:
+                    ranked["text"] = (cx, cy)
+                    ranked.setdefault("text+pad",
+                                      (cx, cy + int(h * 0.06)))
+                elif "button" in ranked and "text+pad" not in ranked:
+                    ranked.setdefault("text+pad",
+                                      ((x1 + x2) // 2,
+                                       cy + int(h * 0.06)))
+            if not exact and "hidden" not in ranked:
+                rid_says_hold = ("hold" in rid or "press" in rid
+                                 or "hold" in desc or "press" in desc)
+                cls_is_button = "button" in cls
+                if rid_says_hold and (cls_is_button or clickable
+                                      or rid_says_hold):
+                    ranked["hidden"] = (cx, cy)
+
+        order = ["button", "text", "text+pad", "hidden"]
+        return [(t, ranked[t]) for t in order if t in ranked]
 
     def _hold_button_until_page_changes(self, labels: list[str],
                                         timeout: float) -> None:
@@ -877,7 +879,10 @@ class OutlookFlow(AppSearchFlow):
         no scrolling here: lifting to scroll would fail the challenge."""
         deadline = time.time() + timeout
         proc: subprocess.Popen | None = None
+        cands: list[tuple[str, tuple[int, int]]] = []
+        idx = 0
         last_tick = time.time()
+        last_wait_note = 0.0
         misses = 0
 
         def spawn_press(px: int, py: int, ms: int) -> subprocess.Popen:
@@ -906,17 +911,33 @@ class OutlookFlow(AppSearchFlow):
                     misses = 0
 
                 if proc is None or proc.poll() is not None:
-                    # previous press ended — re-locate and press again
-                    pos = self._find_any_button(labels)
-                    if pos:
-                        remaining_ms = int((deadline - time.time()) * 1000)
-                        proc = spawn_press(pos[0], pos[1],
-                                           min(remaining_ms, 300_000))
-                        self.step("human_hold",
-                                  f"finger down at {pos} — holding until "
-                                  f"the page changes")
-                    # button missing → just wait; scrolling would lift
-                    # the finger and reset the challenge
+                    if not cands or idx >= len(cands):
+                        # (re)scan with a fresh dump — the widget may
+                        # expose its real hold control once loaded
+                        cands = self._hold_candidates(labels)
+                        idx = 0
+                        if not cands:
+                            # STRICT mode: no exact 'press and hold'
+                            # control on screen — never blind-press
+                            # random text; just wait and re-scan
+                            now_w = time.time()
+                            if now_w - last_wait_note >= 15:
+                                last_wait_note = now_w
+                                self.step("human_hold",
+                                          f"no exact "
+                                          f"'{labels[0]}' control found "
+                                          f"yet — waiting ...")
+                            if time.time() >= deadline:
+                                break
+                            time.sleep(3.0)
+                            continue
+                    tag, pos = cands[idx]
+                    idx += 1
+                    remaining_ms = int((deadline - time.time()) * 1000)
+                    proc = spawn_press(pos[0], pos[1],
+                                       min(remaining_ms, _HOLD_PRESS_MS))
+                    self.step("human_hold",
+                              f"finger down ({tag}) at {pos} — holding")
 
                 now = time.time()
                 if now - last_tick >= 20:
