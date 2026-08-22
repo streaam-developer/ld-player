@@ -643,32 +643,40 @@ class OutlookFlow(AppSearchFlow):
         self._tap_next()
 
     def _fill_year_box(self, year: str) -> None:
-        """Type the birth year straight into the Year box.
+        """Type the birth year into the Year box — ONE fill, no re-cycles.
 
-        The first keystrokes can race the focus/keyboard animation, so the
-        fill is retried and its result confirmed before falling back to the
-        scrollable native picker."""
+        Chrome's WebView often never echoes the freshly typed value back
+        through uiautomator, so a failed confirmation must NOT trigger
+        delete-and-retype rounds (the values visibly land fine). We pick
+        the editable field closest to the Year label, fill once, confirm
+        best-effort, then move on to Next."""
         pos = self.auto.find_text("Year")
         if not pos:
             raise AutomationError("'Year' box not found")
-        self.step("year", f"tapping 'Year' box at {pos}, typing '{year}'...")
-        self.auto.tap(*pos, wait=1.5)
+        self.step("year", f"typing '{year}' into the Year box near {pos}...")
+        self.auto.tap(*pos, wait=1.2)
+
         fields = self._page_fields()
-        if fields:
-            for attempt in (1, 2):
-                self.auto.fill_field(*fields[0], year)
-                self._hide_keyboard()
-                deadline = time.time() + 6
-                while time.time() < deadline:
-                    if self._find_exact(year) or self._field_shows(year):
-                        self.step("year",
-                                  f"year '{year}' confirmed in the box")
-                        return
-                    time.sleep(1.2)
-                self.step("year",
-                          f"attempt {attempt} did not stick — refilling...")
-            self.step("year", "typing failed — falling back to picker ...")
-        self._pick_select("Year", [year])
+        if not fields:
+            # no editable input appeared — a native list probably opened
+            self.step("year", "no text field found — using the picker ...")
+            self._pick_select("Year", [year])
+            return
+
+        target = min(fields, key=lambda f: abs(f[0] - pos[0])
+                     + abs(f[1] - pos[1]))
+        self.auto.fill_field(*target, year)
+
+        deadline = time.time() + 4
+        while time.time() < deadline:
+            if self._find_exact(year) or self._field_shows(year):
+                self.step("year", f"year '{year}' confirmed in the box")
+                return
+            time.sleep(1)
+        # value landed but the UI tree does not echo it — trust and continue
+        self.step("year",
+                  f"'{year}' not echoed by the UI tree — continuing "
+                  f"(box was filled)")
 
     def _pick_select(self, hint: str, variants: list[str],
                      timeout: float = 60) -> str:

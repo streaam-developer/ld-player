@@ -29,74 +29,65 @@ export default {
   async email(message, env, ctx) {
     const recipient = message.to;
 
-    // Facebook's signup confirmation emails carry the code in the
-    // SUBJECT line ("12345 is your Facebook confirmation code") and it
-    // is always exactly 5 digits.
-    //
-    // NEVER scan message.raw for bare digit-runs: the RFC822 headers at
-    // the top are full of 13-digit millisecond timestamps (DKIM/ARC
-    // "t=1787335365747"), which is how bogus 8-digit "codes" used to be
-    // extracted. Subject first; body only as a guarded fallback.
+    const subject = message.headers.get("subject") || "";
+    const rawBody = await new Response(message.raw).text();
+
+    // drop the headers: the body begins after the first blank line
+    let body = rawBody;
+    const sep = rawBody.indexOf("\r\n\r\n");
+    if (sep >= 0) body = rawBody.slice(sep + 4);
+
+    // decode simple quoted-printable soft/hard breaks that could split digits
+    body = body.replace(/=\r?\n/g, "").replace(/=([0-9A-Fa-f]{2})/g,
+      (_, h) => String.fromCharCode(parseInt(h, 16)));
+
+    const from = (message.from || "").toLowerCase();
+    const subjLow = subject.toLowerCase();
+    const isMicrosoft =
+      from.includes("microsoft") || from.includes("account-security") ||
+      subjLow.includes("microsoft") || subjLow.includes("security code");
+
     let code = null;
 
-    const subject = message.headers.get("subject") || "";
-    const subjMatch = subject.match(/(?<!\d)(\d{5})(?!\d)/);
-    if (subjMatch) {
-      code = subjMatch[1];
-      console.log(`Code ${code} taken from subject for ${recipient}`);
-    }
-
-    if (!code) {
-      const rawBody = await new Response(message.raw).text();
-
-      // drop the headers: the body begins after the first blank line
-      let body = rawBody;
-      const sep = rawBody.indexOf("\r\n\r\n");
-      if (sep >= 0) body = rawBody.slice(sep + 4);
-
-      // decode simple quoted-printable soft/hard breaks that could split digits
-      body = body.replace(/=\r?\n/g, "").replace(/=([0-9A-Fa-f]{2})/g,
-        (_, h) => String.fromCharCode(parseInt(h, 16)));
-
-      // prefer an explicit "code" context, else a standalone 5-digit run
-      // ((?<!\d)(?!\d)) so parts of longer IDs/timestamps never match
-      const m = body.match(/code[^0-9]{0,30}(?<!\d)(\d{5})(?!\d)/i)
-             || body.match(/(?<!\d)(\d{5})(?!\d)/);
+    if (isMicrosoft) {
+      // Outlook/Microsoft security codes are 4-8 digits and ALWAYS sit in
+      // an explicit code context ("Security code: 759954"). Never bare-scan
+      // this mail: its own footer carries the Redmond ZIP "98052", which
+      // the old generic 5-digit scan happily returned as a bogus OTP.
+      const m = subject.match(/(?<!\d)(\d{4,8})(?!\d)/)
+             || body.match(/security\s*code[^0-9]{0,20}(?<!\d)(\d{4,8})(?!\d)/i)
+             || body.match(/code[^0-9]{0,30}(?<!\d)(\d{4,8})(?!\d)/i);
       if (m) {
         code = m[1];
-        console.log(`Code ${code} taken from body for ${recipient}`);
+        console.log(`Microsoft code ${code} for ${recipient}`);
+      } else {
+        console.log(`No Microsoft security code found in email to ${recipient}`);
+      }
+    } else {
+      // Facebook signup codes: exactly five digits, subject first.
+      // NEVER scan message.raw for bare digit-runs otherwise — the RFC822
+      // headers are full of 13-digit DKIM/ARC timestamps.
+      const subjMatch = subject.match(/(?<!\d)(\d{5})(?!\d)/);
+      if (subjMatch) {
+        code = subjMatch[1];
+        console.log(`Code ${code} taken from subject for ${recipient}`);
       }
 
-      // Microsoft security codes (Outlook signup): usually FOUR digits,
-      // e.g. subject "Microsoft account security code: 4821" or body
-      // "Use 4821 as Microsoft account security code". Only consulted when
-      // no 5-digit Facebook code matched, and only for Microsoft mail, so
-      // Facebook behaviour stays untouched. The \d{4,8} lookarounds can
-      // never swallow the 13-digit DKIM/ARC timestamps.
       if (!code) {
-        const from = (message.from || "").toLowerCase();
-        const subjLow = subject.toLowerCase();
-        const isMicrosoft =
-          from.includes("microsoft") || from.includes("account-security") ||
-          subjLow.includes("microsoft") || subjLow.includes("security code");
-        if (isMicrosoft) {
-          // covers both word orders:
-          //   "Security code: 7731"           -> code BEFORE digits
-          //   "Use 4821 as ... security code" -> digits BEFORE code
-          const msBody =
-              body.match(/code[^0-9]{0,30}(?<!\d)(\d{4,8})(?!\d)/i)
-           || body.match(/(?<!\d)(\d{4,8})(?!\d)[^\n]{0,80}\bcode\b/i);
-          const msSubj = subject.match(/(?<!\d)(\d{4,8})(?!\d)/);
-          code = (msBody && msBody[1]) || (msSubj && msSubj[1]) || null;
-          if (code) {
-            console.log(`Microsoft code ${code} for ${recipient}`);
-          }
+        // prefer an explicit "code" context, else a standalone 5-digit run
+        // ((?<!\d)(?!\d)) so parts of longer IDs/timestamps never match
+        const m = body.match(/code[^0-9]{0,30}(?<!\d)(\d{5})(?!\d)/i)
+               || body.match(/(?<!\d)(\d{5})(?!\d)/);
+        if (m) {
+          code = m[1];
+          console.log(`Code ${code} taken from body for ${recipient}`);
+        } else {
+          console.log(`No 5-digit code found in email to ${recipient}`);
         }
       }
     }
 
     if (!code) {
-      console.log(`No 5-digit code found in email to ${recipient}`);
       return;
     }
 
