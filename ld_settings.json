@@ -1,0 +1,26 @@
+{
+    "statusSettings.isNewPlayer": true,
+    "statusSettings.playerName": "",
+    "basicSettings.verticalSync": false,
+    "advancedSettings.resolution": {
+        "width": 720,
+        "height": 1280
+    },
+    "advancedSettings.resolutionDpi": 320,
+    "basicSettings.fsAutoSize": 1,
+    "advancedSettings.cpuCount": 4,
+    "advancedSettings.memorySize": 4096,
+    "basicSettings.fps": 60,
+    "statusSettings.sharedApplications": "C:/Users/zrs2026/Documents/XuanZhi9/Applications",
+    "statusSettings.sharedPictures": "C:/Users/zrs2026/Documents/XuanZhi9/Pictures",
+    "statusSettings.sharedMisc": "C:/Users/zrs2026/Documents/XuanZhi9/Misc",
+    "basicSettings.width": 464,
+    "basicSettings.height": 825,
+    "basicSettings.realHeigh": 860,
+    "basicSettings.realWidth": 504,
+    "networkSettings.networkEnable": true,
+    "basicSettings.isForstStart": false,
+    "basicSettings.mulFsAddSize": 0,
+    "basicSettings.mulFsAutoSize": 2,
+    "statusSettings.closeOption": 1
+}

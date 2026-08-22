@@ -18,6 +18,12 @@ Auto mode (default):
   Runs until --accounts successes are reached, or forever until Ctrl+C
   (first Ctrl+C waits for running signups to finish; second force-quits).
 
+SETTINGS TEMPLATE: --settings-from <name|index> exports that instance's
+full settings (CPU/RAM, resolution, fps, window size, ...) into
+ld_settings.json and every new signup instance gets them applied on top of
+its random device identity. Once exported, plain runs keep using it until
+you delete ld_settings.json or re-export.
+
 MANUAL INPUT (default): when the email page appears the script pauses and
 YOU type the email in the emulator and tap Next; same for the confirmation
 code — you enter it yourself and tap Next. The script detects that you
@@ -63,7 +69,7 @@ from ldplayer.config import find_ldconsole, load_config
 from ldplayer.console import LdConsole
 from ldplayer.adb import Adb
 from ldplayer.facebook import signup_flow
-from ldplayer.farm import SignupFarm
+from ldplayer.farm import SETTINGS_FILE, SignupFarm, export_instance_settings
 
 
 def main() -> int:
@@ -95,6 +101,14 @@ def main() -> int:
                         "to CLONE for every new signup instance — it should "
                         "already have Facebook installed and NO accounts "
                         "(omitted = create blank instances)")
+    p.add_argument("--settings-from",
+                   help="auto mode: name or index of an instance whose full "
+                        "settings (CPU/RAM, resolution, fps, window size, "
+                        "...) should be exported to ld_settings.json and "
+                        "applied to every NEW signup instance (device "
+                        "identity stays random). Re-run to refresh the "
+                        "export; without it, an existing ld_settings.json "
+                        "is used as-is")
     p.add_argument("--package", default="com.facebook.katana")
     p.add_argument("--apk",
                    help="path to the Facebook apk/apkm/xapk to install if "
@@ -129,6 +143,22 @@ def main() -> int:
     # manual input (you type email + code) unless --auto-input is given
     manual = not args.auto_input
 
+    # settings template: fresh export from --settings-from, else the
+    # existing ld_settings.json export if one was saved before
+    settings_file = None
+    try:
+        if args.settings_from:
+            dest, exported = export_instance_settings(console,
+                                                      args.settings_from)
+            print(f"exported {len(exported)} settings from "
+                  f"'{args.settings_from}' to {dest}", flush=True)
+            settings_file = dest
+        elif SETTINGS_FILE.is_file():
+            settings_file = SETTINGS_FILE
+    except Exception as exc:
+        print(f"\nERROR: {exc}", flush=True)
+        return 1
+
     # ------------------------------------------------------- auto farm mode
     if args.index is None and args.name is None:
         try:
@@ -142,7 +172,8 @@ def main() -> int:
                 flow_timeout=args.flow_timeout,
                 quit_on_success=not args.keep_open,
                 manual_input=manual,
-                template=args.template)
+                template=args.template,
+                settings_file=settings_file)
             ok, bad = farm.run()
         except Exception as exc:
             print(f"\nERROR: {exc}", flush=True)

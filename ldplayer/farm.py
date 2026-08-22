@@ -38,8 +38,59 @@ from .repair import _is_admin
 ROOT = Path(__file__).resolve().parent.parent
 SAVED_FILE = ROOT / "saved_instances.txt"
 
+#: settings-template file — when present, every new instance is given these
+#: settings (CPU/RAM, resolution, fps, window geometry, ...) on top of its
+#: random device identity. Created with --settings-from <name|index>.
+SETTINGS_FILE = ROOT / "ld_settings.json"
+
+#: keys never copied from a settings template onto new instances:
+#: identity must stay random per instance, adb must stay ON for the
+#: automation, and windows should not all pile up at the same spot
+_IDENTITY_PREFIX = "propertySettings."
+_SETTINGS_SKIP_KEYS = {
+    "basicSettings.adbDebug",
+    "basicSettings.left",
+    "basicSettings.top",
+}
+
 #: prefix marking instances owned by this tool — only these ever get deleted
 INSTANCE_PREFIX = "auto_"
+
+
+def _vms_config_dir() -> Path | None:
+    """Folder holding leidianN.config files (from saved ldconsole path)."""
+    lc = load_config().get("ldconsole")
+    return Path(lc).parent / "vms" / "config" if lc else None
+
+
+def export_instance_settings(console: LdConsole, raw_target: str,
+                             dest: Path = SETTINGS_FILE) -> tuple[Path, dict]:
+    """Export an instance's settings to a JSON template file.
+
+    ``raw_target`` is a name or index (e.g. ``LDPlayer`` or ``0``).
+    Identity keys (IMEI/IMSI/MAC/model/manufacturer/...) are stripped so
+    every instance created from this template keeps its own random
+    identity; adbDebug / window position are dropped too (forced/managed
+    at creation time). Returns (dest, exported_dict).
+    """
+    raw = str(raw_target).strip()
+    inst = console.find(index=int(raw)) if raw.isdigit() else None
+    if inst is None:
+        inst = console.find(name=raw)
+    if inst is None:
+        raise RuntimeError(f"instance '{raw_target}' not found")
+    cfg_dir = _vms_config_dir()
+    src = cfg_dir / f"leidian{inst.index}.config" if cfg_dir else None
+    if not src or not src.is_file():
+        raise RuntimeError(
+            f"could not read config of '{inst.name}' ({src})")
+    data = json.loads(src.read_text(encoding="utf-8"))
+    exported = {k: v for k, v in data.items()
+                if not k.startswith(_IDENTITY_PREFIX)
+                and k not in _SETTINGS_SKIP_KEYS}
+    dest.write_text(json.dumps(exported, indent=4, ensure_ascii=False),
+                    encoding="utf-8")
+    return dest, exported
 
 FIRST_NAMES = ["Alex", "Sam", "Jordan", "Taylor", "Casey", "Riley", "Morgan",
                "Jamie", "Avery", "Drew", "Reese", "Quinn", "Blake", "Skyler",
@@ -63,7 +114,8 @@ class SignupFarm:
                  flow_timeout: float = 1500.0,
                  quit_on_success: bool = True,
                  manual_input: bool = False,
-                 template: str | None = None):
+                 template: str | None = None,
+                 settings_file: str | Path | None = None):
         self.console = console
         self.adb = adb
         self.workers = max(1, workers)
@@ -85,6 +137,8 @@ class SignupFarm:
         #: come pre-installed
         self.template = template
         self._template_target: tuple[int, str] | None = None
+        #: settings template applied to every new instance (see SETTINGS_FILE)
+        self.settings_file = Path(settings_file) if settings_file else None
 
         self._stop = threading.Event()
         self._create_lock = threading.Lock()   # ldconsole add/modify/remove
@@ -221,6 +275,44 @@ class SignupFarm:
                 "instance list")
         return inst.index, inst.name
 
+    def _apply_settings(self, index: int) -> bool:
+        """Overlay the settings template (ld_settings.json) onto an instance.
+
+        Copies every key except per-instance identity (IMEI/IMSI/MAC/model/
+        ... stays random), forces adbDebug back ON, and leaves window
+        position to LDPlayer. Must run while the instance is STOPPED.
+        """
+        if not self.settings_file or not self.settings_file.is_file():
+            return False
+        vms = self._vms_root()
+        cfg_file = vms / "config" / f"leidian{index}.config" if vms else None
+        if not cfg_file or not cfg_file.is_file():
+            return False
+        try:
+            overlay = json.loads(
+                self.settings_file.read_text(encoding="utf-8"))
+            data = json.loads(cfg_file.read_text(encoding="utf-8"))
+            copied = 0
+            for key, value in overlay.items():
+                if key.startswith(_IDENTITY_PREFIX):
+                    continue
+                if key in _SETTINGS_SKIP_KEYS:
+                    continue
+                data[key] = value
+                copied += 1
+            data["basicSettings.adbDebug"] = 1
+            tmp = cfg_file.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data, indent=4, ensure_ascii=False),
+                           encoding="utf-8")
+            tmp.replace(cfg_file)
+            self._log(f"applied {copied} settings from "
+                      f"{self.settings_file.name} to leidian{index}")
+            return True
+        except (OSError, ValueError) as exc:
+            self._log(f"could not apply settings template to "
+                      f"leidian{index}: {exc}")
+            return False
+
     def _create_instance(self, name: str) -> int:
         """Create (+randomise device settings). Returns the instance index.
 
@@ -262,6 +354,9 @@ class SignupFarm:
                     f"(index {inst.index}) — discarding it")
             # open the player window tall like a phone, never landscape
             self._fix_window_shape(inst.index)
+            # then give it the saved settings template (CPU/RAM, fps,
+            # window geometry, ...) — identity stays random
+            self._apply_settings(inst.index)
             mode = "cloned from template" if self._template_target else \
                 "created blank"
             self._log(f"{mode} '{name}' (index {inst.index}) — "
@@ -500,6 +595,22 @@ class SignupFarm:
     # ------------------------------------------------------------------ main
     def run(self) -> tuple[int, int]:
         self._preflight()
+        if self.settings_file and self.settings_file.is_file():
+            try:
+                tpl = json.loads(
+                    self.settings_file.read_text(encoding="utf-8"))
+                cpu = tpl.get("advancedSettings.cpuCount", "?")
+                mem = tpl.get("advancedSettings.memorySize", "?")
+                res = tpl.get("advancedSettings.resolution", {})
+                fps = tpl.get("basicSettings.fps", "?")
+                self._log(f"settings template: {self.settings_file.name} — "
+                          f"cpu={cpu} ram={mem}MB fps={fps} "
+                          f"res={res.get('width')}x{res.get('height')}")
+            except (OSError, ValueError):
+                pass
+        elif self.settings_file:
+            self._log(f"NOTE: settings template {self.settings_file} not "
+                      "found — instances keep their generated settings")
         if self.template:
             tidx, tname = self._resolve_template()
             self._template_target = (tidx, tname)
