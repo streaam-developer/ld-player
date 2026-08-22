@@ -47,6 +47,8 @@ from .email_otp import fetch_otp, OtpTimeout
 
 
 START_URL = "https://outlook.office.com/mail/"
+#: the SIGNED-IN inbox — mail list lives here once the account exists
+INBOX_URL = "https://outlook.live.com/mail/inbox"
 EMAIL_DOMAIN = "dailykhabar.bond"
 
 # ------------------------------------------------------------- chrome first run
@@ -554,9 +556,15 @@ class OutlookFlow(AppSearchFlow):
             time.sleep(2.0)
         return dismissed
 
-    def navigate(self, url: str = START_URL, load_timeout: float = 150
-                 ) -> None:
-        """Type the URL into Chrome's address bar and wait for the page."""
+    def navigate(self, url: str = START_URL, load_timeout: float = 150,
+                 wait_for: list[str] | None = None) -> None:
+        """Type the URL into Chrome's address bar and wait for the page.
+
+        By default the signup START page is expected, so loading is
+        confirmed via its 'create one' / 'sign in' wording. Pass an empty
+        list for pages that never show those fragments (e.g. the
+        signed-in INBOX at outlook.live.com/mail/inbox) — a fixed settle
+        delay is used there instead."""
         pos: tuple[int, int] | None = None
         for rid in URL_BAR_IDS:
             pos = self.auto.find_by_resource_id(rid)
@@ -578,8 +586,15 @@ class OutlookFlow(AppSearchFlow):
         self.auto.fill_field(*pos, url)
         time.sleep(0.6)
         self.auto.enter()
-        self.step("load", "waiting for outlook.office.com to load ...")
-        self._wait_for_any_text(LOAD_FRAGMENTS, load_timeout)
+        if wait_for is None:
+            wait_for = LOAD_FRAGMENTS
+        if wait_for:
+            self.step("load", f"waiting for {url} to load ...")
+            self._wait_for_any_text(wait_for, load_timeout)
+        else:
+            # no reliable on-screen marker — give the SPA time to render
+            self.step("load", f"letting {url} settle ...")
+            time.sleep(8)
         self._dismiss_popups()
 
     # ------------------------------------------------------- signup steps
@@ -1065,7 +1080,7 @@ class OutlookFlow(AppSearchFlow):
             # periodically reload the inbox so fresh mail shows up
             if time.time() - last_nav >= 30:
                 try:
-                    self.navigate(START_URL, load_timeout=60)
+                    self.navigate(INBOX_URL, load_timeout=60, wait_for=[])
                 except AutomationError as exc:
                     self.step("otp_mail",
                               f"inbox load issue ({exc}) — retrying ...")
