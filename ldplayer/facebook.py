@@ -33,6 +33,7 @@ import json
 import random
 import re
 import string
+import threading
 import time
 
 from pathlib import Path
@@ -111,6 +112,9 @@ CREDENTIALS_FILE = "raw.txt"
 #: File to track successful / failed signups
 TRACKER_FILE = "tracker.json"
 
+#: Serialises tracker.json / raw.txt writes across parallel worker threads
+_FILE_LOCK = threading.Lock()
+
 #: runtime permissions worth pre-granting so the dialog resolves cleanly
 SIGNUP_PERMISSIONS = [
     "android.permission.READ_CONTACTS",
@@ -150,6 +154,8 @@ class FacebookFlow:
         self.package = package
         self.auto = Automator(console, adb, self.inst)
         self.report: dict = {}
+        #: "success" | "blocked" | "" (error / never finished) — set by run()
+        self.success: str = ""
         self._email: str = ""
         self._password: str = ""
         self._cf_worker_url = cf_worker_url
@@ -801,8 +807,9 @@ class FacebookFlow:
         line = f"{self._email}|{self._password}\n"
         dest = Path(__file__).resolve().parent.parent / CREDENTIALS_FILE
         try:
-            with open(dest, "a", encoding="utf-8") as fh:
-                fh.write(line)
+            with _FILE_LOCK:
+                with open(dest, "a", encoding="utf-8") as fh:
+                    fh.write(line)
             self.step("save_creds",
                       f"saved to {dest}: {self._email}|{'*' * len(self._password)}")
         except OSError as exc:
@@ -936,17 +943,19 @@ class FacebookFlow:
         """Increment the ``successful`` or ``failed`` counter in
         ``tracker.json``.  Creates the file with defaults if absent."""
         dest = Path(__file__).resolve().parent.parent / TRACKER_FILE
-        data: dict = {"successful": 0, "failed": 0}
-        if dest.exists():
-            try:
-                data = json.loads(dest.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
-                pass
-        if success:
-            data["successful"] = data.get("successful", 0) + 1
-        else:
-            data["failed"] = data.get("failed", 0) + 1
-        dest.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        with _FILE_LOCK:
+            data: dict = {"successful": 0, "failed": 0}
+            if dest.exists():
+                try:
+                    data = json.loads(dest.read_text(encoding="utf-8"))
+                except (json.JSONDecodeError, OSError):
+                    pass
+            if success:
+                data["successful"] = data.get("successful", 0) + 1
+            else:
+                data["failed"] = data.get("failed", 0) + 1
+            dest.write_text(json.dumps(data, indent=2) + "\n",
+                            encoding="utf-8")
         status = "SUCCESS" if success else "FAILED"
         print(f"  [tracker] {status} — "
               f"successful={data['successful']} failed={data['failed']} "
@@ -1008,13 +1017,18 @@ class FacebookFlow:
             apk_path: str | Path | None = None,
             first_name: str = "Alex", last_name: str = "Johnson",
             otp_timeout: float = 120,
-            flow_timeout: float = 1500) -> dict:
+            flow_timeout: float = 1500,
+            email: str | None = None) -> dict:
         """Adaptive signup loop.
 
         Instead of a rigid step order, we classify whatever screen Facebook
         currently shows and run its handler — so popups, extra pages, and
         mid-flow resumes all work. Each stage runs once; permission dialogs
         and interstitials are handled whenever they appear.
+
+        ``email`` — a pre-generated address to sign up with; when omitted a
+        random one is created at typing time. On return, :attr:`success`
+        holds "success", "blocked", or "" (flow errored / never completed).
         """
         self.open_instance_and_launcher(boot_timeout)
         self.ensure_facebook_installed(apk_path, timeout=install_timeout)
@@ -1064,6 +1078,7 @@ class FacebookFlow:
                         break  # final human-block scan decides success
 
                     self._update_tracker(success=False)
+                    self.success = "blocked"
                     self.step("done",
                               "flow finished — BLOCKED by human verification")
                     return self.report
@@ -1083,7 +1098,7 @@ class FacebookFlow:
 
                 elif (screen in ("email", "mobile")
                       and "contact" not in done):
-                    self.enter_email()
+                    self.enter_email(email=email)
                     done.add("contact")
 
                 elif screen == "gender" and "gender" not in done:
@@ -1137,8 +1152,10 @@ class FacebookFlow:
         blocked = self.check_human_block(timeout=20)
         self._update_tracker(success=not blocked)
         if blocked:
+            self.success = "blocked"
             self.step("done", "flow finished — BLOCKED by human verification")
         else:
+            self.success = "success"
             self.step("done", "flow complete — account created successfully")
         return self.report
 
@@ -1151,11 +1168,13 @@ def signup_flow(console: LdConsole, adb: Adb, index: int | None = None,
                 apk_path: str | Path | None = None,
                 first_name: str = "Alex", last_name: str = "Johnson",
                 cf_worker_url: str = "", cf_worker_api_key: str = "",
-                otp_timeout: float = 120) -> dict:
+                otp_timeout: float = 120,
+                email: str | None = None) -> dict:
     flow = FacebookFlow(console, adb, index=index, name=name, package=package,
                         cf_worker_url=cf_worker_url,
                         cf_worker_api_key=cf_worker_api_key)
     return flow.run(step_wait=step_wait, hold=hold, grant_perms=grant_perms,
                     boot_timeout=boot_timeout, install_timeout=install_timeout,
                     apk_path=apk_path, first_name=first_name,
-                    last_name=last_name, otp_timeout=otp_timeout)
+                    last_name=last_name, otp_timeout=otp_timeout,
+                    email=email)
