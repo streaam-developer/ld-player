@@ -6,7 +6,7 @@ with a random mobile identity. Flow:
 1. open the instance and wait until the launcher (apps grid) is showing
 2. search the system apps for Chrome and open it
 3. dismiss Chrome's first-run screens ("Welcome to Chrome" ->
-   "Use without signing in" -> "Got it")
+   "Use without signing in" -> "More" -> "Got it")
 4. navigate to https://outlook.office.com/mail/ and wait until loaded
 5. tap "Create one", type a random 8-char letter+number username, Next
 6. create a strong password, Next
@@ -53,6 +53,8 @@ CHROME_WELCOME = "welcome to chrome"
 USE_WITHOUT_BUTTONS = ["Use without signing in", "Use without an account",
                        "No thanks"]
 GOT_IT_BUTTONS = ["Got it", "Got It", "GOT IT"]
+#: intermediate first-run pages ("sync?" etc.) advance via a More button
+MORE_BUTTONS = ["More"]
 
 URL_BAR_IDS = ["com.android.chrome:id/url_bar",
                "com.android.chrome:id/search_box_text"]
@@ -375,8 +377,8 @@ class OutlookFlow(AppSearchFlow):
     def handle_first_run(self, timeout: float = 45) -> bool:
         """Dismiss Chrome's first-run wizard when present.
 
-        "Welcome to Chrome" -> "Use without signing in" -> "Got it".
-        Returns True when anything was dismissed.
+        "Welcome to Chrome" -> "Use without signing in" -> "More" ->
+        "Got it". Returns True when anything was dismissed.
         """
         deadline = time.time() + timeout
         dismissed = False
@@ -407,6 +409,19 @@ class OutlookFlow(AppSearchFlow):
                     self.auto.tap(*pos, wait=3.0)
                     dismissed = True
                     break
+                time.sleep(1.5)
+                continue
+
+            # intermediate first-run page: advance with its More button
+            more = next((b for b in MORE_BUTTONS
+                         if b.lower() in joined), None)
+            if more and (dismissed or welcome_seen_at):
+                pos = self.auto.find_text(more)
+                if pos:
+                    self.step("first_run",
+                              f"'{more}' page — advancing at {pos}...")
+                    self.auto.tap(*pos, wait=2.5)
+                    dismissed = True
                 time.sleep(1.5)
                 continue
 

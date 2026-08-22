@@ -5,7 +5,7 @@ identity, adb forced on), then inside it:
 
     1. opens Chrome (searched in the launcher like a human would)
     2. dismisses Chrome's first-run screens ("Welcome to Chrome" ->
-       "Use without signing in" -> "Got it")
+       "Use without signing in" -> "More" -> "Got it")
     3. navigates to https://outlook.office.com/mail/ and waits for load
     4. taps "Create one", types a random 8-char letter+number username,
        Next; strong password, Next
