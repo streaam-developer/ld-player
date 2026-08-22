@@ -32,9 +32,13 @@ class OtpTimeout(RuntimeError):
 #: Facebook signup confirmation codes are always exactly five digits.
 OTP_SHAPE = re.compile(r"\d{5}")
 
+#: Microsoft security codes are commonly four digits (sometimes longer).
+MS_CODE_SHAPE = re.compile(r"\d{4,8}")
+
 
 def fetch_otp(worker_url: str, api_key: str, email: str, *,
-              timeout: float = 120, poll: float = 5.0) -> str:
+              timeout: float = 120, poll: float = 5.0,
+              shape: "re.Pattern[str]" = OTP_SHAPE) -> str:
     """Poll the Cloudflare HTTP Worker until an OTP code arrives.
 
     Parameters
@@ -49,6 +53,9 @@ def fetch_otp(worker_url: str, api_key: str, email: str, *,
         Maximum seconds to wait before raising :class:`OtpTimeout`.
     poll:
         Seconds between polling attempts.
+    shape:
+        Regex the code must fully match. Facebook codes are 5 digits;
+        pass ``MS_CODE_SHAPE`` for Microsoft's 4-8 digit security codes.
 
     Returns
     -------
