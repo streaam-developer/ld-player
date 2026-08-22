@@ -61,7 +61,8 @@ class SignupFarm:
                  boot_timeout: float = 600.0,
                  install_timeout: float = 840.0,
                  flow_timeout: float = 1500.0,
-                 quit_on_success: bool = True):
+                 quit_on_success: bool = True,
+                 manual_input: bool = False):
         self.console = console
         self.adb = adb
         self.workers = max(1, workers)
@@ -75,6 +76,9 @@ class SignupFarm:
         self.install_timeout = install_timeout
         self.flow_timeout = flow_timeout
         self.quit_on_success = quit_on_success
+        #: when True the USER types the email / confirmation code in the
+        #: emulator and the flow just waits for them
+        self.manual_input = manual_input
 
         self._stop = threading.Event()
         self._create_lock = threading.Lock()   # ldconsole add/modify/remove
@@ -331,30 +335,34 @@ class SignupFarm:
         with self._state_lock:
             self._active[name] = "running"
 
-        email = claim_email()
+        email = "" if self.manual_input else claim_email()
         first = random.choice(FIRST_NAMES)
         last = random.choice(LAST_NAMES)
         saved = False
         try:
-            self._log(f"worker {worker_id}: signing up on '{name}' "
-                      f"as {first} {last} <{email}>")
+            who = (f"as {first} {last} <{email}>" if email else
+                   f"as {first} {last} — YOU will type the email")
+            self._log(f"worker {worker_id}: signing up on '{name}' {who}")
             flow = FacebookFlow(
                 self.console, self.adb, name=name, package=self.package,
                 cf_worker_url=self.cf_worker_url,
-                cf_worker_api_key=self.cf_worker_api_key)
+                cf_worker_api_key=self.cf_worker_api_key,
+                manual_email=self.manual_input,
+                manual_otp=self.manual_input)
             flow.run(boot_timeout=self.boot_timeout,
                      install_timeout=self.install_timeout,
                      apk_path=self.apk_path,
                      first_name=first, last_name=last,
                      otp_timeout=self.otp_timeout,
                      flow_timeout=self.flow_timeout,
-                     email=email)
+                     email=email or None)
             outcome = flow.success or "blocked"
             if outcome == "success":
                 # lock in the verdict FIRST — nothing below may un-save it
                 saved = True
             else:
-                self._log(f"FAILED on '{name}' ({email}) — {outcome}; "
+                shown = email or getattr(flow, "_email", "") or "email?"
+                self._log(f"FAILED on '{name}' ({shown}) — {outcome}; "
                           "deleting instance")
         except Exception as exc:  # noqa: BLE001
             self._log(f"ERROR during signup on '{name}': {exc}")
@@ -362,12 +370,14 @@ class SignupFarm:
         if saved:
             info = getattr(flow.inst, "info", None)
             idx = info.index if info else index
+            record_email = (email or getattr(flow, "_email", "")
+                            or "manual")
             try:
-                self._save_record(name, idx, email)
+                self._save_record(name, idx, record_email)
             except Exception as exc:  # noqa: BLE001
                 self._log(f"'{name}' could not be logged to "
                           f"{SAVED_FILE.name}: {exc}")
-            self._log(f"SUCCESS on '{name}' ({email}) — keeping instance")
+            self._log(f"SUCCESS on '{name}' ({record_email}) — keeping instance")
             if self.quit_on_success:
                 try:
                     flow.inst.quit()
@@ -415,9 +425,13 @@ class SignupFarm:
         if removed:
             self._log(f"cleaned {removed} leftover instance(s) from earlier "
                       "runs")
-        self._log(f"starting {self.workers} parallel workers"
+        self._log(f"starting {self.workers} parallel worker(s)"
                   + (f" — target {self.accounts} account(s)"
                      if self.accounts else " — Ctrl+C to stop"))
+        if self.manual_input and self.workers > 1:
+            self._log("NOTE: manual input is ON with multiple workers — "
+                      "whichever instance reaches its manual step first "
+                      "needs your hands")
         threads = [threading.Thread(target=self._worker, args=(i + 1,),
                                     name=f"signup-{i + 1}")
                    for i in range(self.workers)]

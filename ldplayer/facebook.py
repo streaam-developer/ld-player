@@ -94,6 +94,17 @@ AGREE_TEXT_FRAGMENTS = ["terms", "privacy", "policies", "agree"]
 CONFIRMATION_HEADER = "confirmation"
 CONFIRM_WAIT_SECONDS = 30
 
+#: Fragments identifying the confirmation-code screen (also used to detect
+#: when the user has manually moved past it in manual-entry mode)
+CONFIRM_SCREEN_FRAGMENTS = ["confirmation", "code", "enter the", "verify"]
+
+#: Manual-entry mode: how long we wait for the user to type an email /
+#: confirmation code by hand and tap Next in the emulator, and how many
+#: consecutive absent-polls count as "the user finished, screen moved on".
+MANUAL_WAIT_TIMEOUT = 900.0
+MANUAL_MISS_POLLS = 6
+EMAIL_TEXT_RE = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
+
 #: Human verification block screen
 #: NOTE: deliberately narrow. Facebook's *legitimate* confirmation-code
 #: page also says things like "...to confirm your account", so greedy
@@ -148,7 +159,8 @@ def find_facebook_apk(extra: Path | None = None) -> Path:
 class FacebookFlow:
     def __init__(self, console: LdConsole, adb: Adb, index: int | None = None,
                  name: str | None = None, package: str = "com.facebook.katana",
-                 cf_worker_url: str = "", cf_worker_api_key: str = ""):
+                 cf_worker_url: str = "", cf_worker_api_key: str = "",
+                 manual_email: bool = False, manual_otp: bool = False):
         self.inst = Instance(console, adb, name=name, index=index)
         self.inst.resolve()
         self.package = package
@@ -160,6 +172,10 @@ class FacebookFlow:
         self._password: str = ""
         self._cf_worker_url = cf_worker_url
         self._cf_worker_api_key = cf_worker_api_key
+        #: manual mode — the USER types the email / confirmation code
+        #: directly in the emulator; automation only hands the step over
+        self._manual_email = manual_email
+        self._manual_otp = manual_otp
 
     # ---------------------------------------------------------------- steps
     def step(self, tag: str, msg: str) -> None:
@@ -681,6 +697,87 @@ class FacebookFlow:
         self.auto.tap(*next_pos, wait=2)
         self._wait_for_screen_change(NEXT_BUTTON, timeout=30)
 
+    # -------------------------------------------------------- manual input
+    def _manual_banner(self, lines: list[str]) -> None:
+        """Loud console notice that a step now belongs to the user."""
+        bar = "=" * 66
+        print(f"\n[{self.inst.name}] {bar}", flush=True)
+        for line in lines:
+            print(f"[{self.inst.name}]   {line}", flush=True)
+        print(f"[{self.inst.name}] {bar}\n", flush=True)
+
+    def _read_field_texts(self) -> list[str]:
+        """Non-empty text currently inside every EditText on screen."""
+        texts: list[str] = []
+        for node in self.auto.find_by_class("EditText"):
+            text = (node.get("text") or "").strip()
+            if text:
+                texts.append(text)
+        return texts
+
+    def _capture_email(self) -> None:
+        """Record the email the user is typing so logs/credentials stay
+        accurate (best-effort, silent on failure)."""
+        if self._email:
+            return
+        for text in self._read_field_texts():
+            if EMAIL_TEXT_RE.fullmatch(text):
+                self._email = text
+                self.step("manual_email", f"noted your email: {text}")
+                return
+
+    def _wait_manual_done(self, gone_fragments: list[str],
+                          next_header: str | None = None,
+                          timeout: float = MANUAL_WAIT_TIMEOUT,
+                          what: str = "input",
+                          on_poll=None) -> None:
+        """Block while the user completes a step by hand in the emulator.
+
+        Done as soon as ``next_header`` appears, or every label in
+        ``gone_fragments`` has been absent for MANUAL_MISS_POLLS
+        consecutive polls — i.e. the screen moved on after their Next
+        tap. ``on_poll`` (optional) runs once per poll cycle.
+        """
+        self.step("manual_wait",
+                  f"waiting for YOU to finish the {what} step "
+                  f"(up to {timeout:.0f}s)...")
+        start = time.time()
+        last_tick = time.time()
+        misses = 0
+        while time.time() - start < timeout:
+            try:
+                if next_header and self.auto.find_text(next_header):
+                    self.step("manual_done",
+                              f"'{next_header}' appeared — "
+                              f"{what} step complete")
+                    return
+                present = any(self.auto.find_text(frag)
+                              for frag in gone_fragments)
+                misses = 0 if present else misses + 1
+                if misses >= MANUAL_MISS_POLLS:
+                    self.step("manual_done",
+                              f"screen moved on — {what} step complete")
+                    return
+            except Exception:  # noqa: BLE001 — adb flakiness must not abort
+                misses += 1
+                if misses >= MANUAL_MISS_POLLS * 5:
+                    raise
+            if on_poll:
+                try:
+                    on_poll()
+                except Exception:  # noqa: BLE001
+                    pass
+            now = time.time()
+            if now - last_tick >= 20:
+                last_tick = now
+                print(f"  [{self.inst.name}] ... still waiting for your "
+                      f"{what} entry ({timeout - (now - start):.0f}s left)",
+                      flush=True)
+            time.sleep(2.0)
+        raise AutomationError(
+            f"timed out waiting for your manual {what} entry "
+            f"({timeout:.0f}s)")
+
     # -------------------------------------------------------- email signup
     def enter_email(self, email: str | None = None,
                     timeout: float = 60) -> None:
@@ -708,6 +805,20 @@ class FacebookFlow:
         if not on_email_screen:
             raise AutomationError(
                 "neither the email field nor 'Sign up with email' appeared")
+
+        # --- Manual mode: hand the step over to the user ---
+        if self._manual_email:
+            self._manual_banner([
+                "ACTION NEEDED — the email page is showing in the emulator.",
+                "1) Type YOUR email address into the field",
+                "2) Tap Next in the emulator",
+                "This script resumes automatically once you tap Next.",
+            ])
+            self._wait_manual_done(
+                [EMAIL_SCREEN_HEADER, SIGN_UP_WITH_EMAIL],
+                next_header=PASSWORD_SCREEN_HEADER,
+                what="email", on_poll=self._capture_email)
+            return
 
         if email is None:
             email = self._random_email()
@@ -867,7 +978,7 @@ class FacebookFlow:
         found = False
         deadline = time.time() + timeout
         while time.time() < deadline:
-            for frag in ("confirmation", "code", "enter the", "verify"):
+            for frag in CONFIRM_SCREEN_FRAGMENTS:
                 if self.auto.find_text(frag):
                     found = True
                     break
@@ -875,6 +986,19 @@ class FacebookFlow:
                 break
             time.sleep(2)
         time.sleep(1)
+
+        # --- Manual mode: the user types the code themselves ---
+        if self._manual_otp:
+            self._manual_banner([
+                "ACTION NEEDED — the confirmation-code page is showing in "
+                "the emulator.",
+                "1) Type the code you received into the field",
+                "2) Tap Next in the emulator",
+                "This script resumes automatically once you tap Next.",
+            ])
+            self._wait_manual_done(CONFIRM_SCREEN_FRAGMENTS,
+                                   what="confirmation-code")
+            return
 
         # --- Try to fetch + enter the OTP automatically ---
         otp_entered = False
@@ -1169,10 +1293,13 @@ def signup_flow(console: LdConsole, adb: Adb, index: int | None = None,
                 first_name: str = "Alex", last_name: str = "Johnson",
                 cf_worker_url: str = "", cf_worker_api_key: str = "",
                 otp_timeout: float = 120,
-                email: str | None = None) -> dict:
+                email: str | None = None,
+                manual_email: bool = False,
+                manual_otp: bool = False) -> dict:
     flow = FacebookFlow(console, adb, index=index, name=name, package=package,
                         cf_worker_url=cf_worker_url,
-                        cf_worker_api_key=cf_worker_api_key)
+                        cf_worker_api_key=cf_worker_api_key,
+                        manual_email=manual_email, manual_otp=manual_otp)
     return flow.run(step_wait=step_wait, hold=hold, grant_perms=grant_perms,
                     boot_timeout=boot_timeout, install_timeout=install_timeout,
                     apk_path=apk_path, first_name=first_name,

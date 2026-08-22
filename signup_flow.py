@@ -1,15 +1,14 @@
 """Facebook signup automation — run directly from the command line.
 
 Auto mode (default):
-    python signup_flow.py [--workers 3] [--accounts N]
+    python signup_flow.py [--workers 1] [--accounts N]
 
-  Keeps `--workers` (default 3) emulator signups running in parallel, each
+  Keeps `--workers` (default 1) emulator signup(s) running in parallel, each
   cycle:
     1. creates a brand-new LDPlayer instance named ``auto_<ts><nn>``
     2. writes a unique random mobile profile into it (IMEI/IMSI/ICCID,
        Android ID, MAC, phone number, manufacturer/model, resolution)
-    3. launches it and runs the Facebook signup flow with a
-       guaranteed-unique email (never reused, tracked in used_emails.json)
+    3. launches it and runs the Facebook signup flow
     4. SUCCESS -> the instance is KEPT (account lives inside it) and logged
        to saved_instances.txt
     5. human-verification block / failure / error -> the instance is
@@ -17,6 +16,12 @@ Auto mode (default):
 
   Runs until --accounts successes are reached, or forever until Ctrl+C
   (first Ctrl+C waits for running signups to finish; second force-quits).
+
+MANUAL INPUT (default): when the email page appears the script pauses and
+YOU type the email in the emulator and tap Next; same for the confirmation
+code — you enter it yourself and tap Next. The script detects that you
+finished and continues automatically. Pass --auto-input to make the bot
+type both itself again.
 
 Single-instance mode (manual runs on an existing emulator):
     python signup_flow.py --index N | --name NAME [--hold]
@@ -31,12 +36,15 @@ Flow inside every signup:
   6. enter first/last name, tap Next
   7. open birthday picker, scroll year >20 years back, tap Set, tap Next
   8. select Male, tap Next
-  9. tap "Sign up with email", enter unique email, tap Next
+  9. tap "Sign up with email", then WAIT while YOU enter your email and
+     tap Next (--auto-input types a random one instead)
   10. create password, tap Next, save email|password to raw.txt
   11. tap "I agree" on terms screen, wait
-  12. fetch OTP from CF Worker, enter code, tap Next
+  12. WAIT while YOU enter the confirmation code and tap Next
+      (--auto-input fetches it from the CF Worker instead)
 
-Requires cf_worker_url + cf_worker_api_key in config.json.
+Requires cf_worker_url + cf_worker_api_key in config.json (only needed
+for --auto-input mode).
 Use --hold to pause after step 3 (press Enter to continue).
 """
 
@@ -69,14 +77,18 @@ def main() -> int:
                                             "(enables single-instance mode)")
     p.add_argument("--name", help="instance name "
                                   "(enables single-instance mode)")
-    p.add_argument("--workers", type=int, default=3,
-                   help="auto mode: parallel signup instances (default: 3)")
+    p.add_argument("--workers", type=int, default=1,
+                   help="auto mode: parallel signup instances (default: 1)")
     p.add_argument("--accounts", type=int, default=0,
                    help="auto mode: stop after this many successful "
                         "signups (0 = keep going until Ctrl+C)")
     p.add_argument("--keep-open", action="store_true",
                    help="auto mode: leave successful instances running "
                         "instead of closing them")
+    p.add_argument("--auto-input", action="store_true",
+                   help="let the bot type the email and confirmation code "
+                        "by itself (default: YOU type them in the emulator "
+                        "and tap Next)")
     p.add_argument("--package", default="com.facebook.katana")
     p.add_argument("--apk",
                    help="path to the Facebook apk/apkm/xapk to install if "
@@ -108,6 +120,9 @@ def main() -> int:
     cfg = load_config()
     adb = Adb(cfg["adb"])
 
+    # manual input (you type email + code) unless --auto-input is given
+    manual = not args.auto_input
+
     # ------------------------------------------------------- auto farm mode
     if args.index is None and args.name is None:
         try:
@@ -119,7 +134,8 @@ def main() -> int:
                 otp_timeout=args.otp_timeout,
                 boot_timeout=args.boot_timeout,
                 flow_timeout=args.flow_timeout,
-                quit_on_success=not args.keep_open)
+                quit_on_success=not args.keep_open,
+                manual_input=manual)
             ok, bad = farm.run()
         except Exception as exc:
             print(f"\nERROR: {exc}", flush=True)
@@ -138,7 +154,8 @@ def main() -> int:
                     last_name=args.last_name or "Johnson",
                     cf_worker_url=cfg.get("cf_worker_url", ""),
                     cf_worker_api_key=cfg.get("cf_worker_api_key", ""),
-                    otp_timeout=args.otp_timeout)
+                    otp_timeout=args.otp_timeout,
+                    manual_email=manual, manual_otp=manual)
     except Exception as exc:
         print(f"\nERROR: {exc}", flush=True)
         traceback.print_exc()
