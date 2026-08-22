@@ -60,6 +60,11 @@ URL_BAR_IDS = ["com.android.chrome:id/url_bar",
                "com.android.chrome:id/search_box_text"]
 URL_BAR_DESCS = ["Search or type URL"]
 
+#: resource-id fragments of Chrome's OWN inputs (omnibox variants) — these
+#: must never receive form typing; web-page inputs carry no resource-id
+CHROME_FIELD_IDS = ["url_bar", "search_box_text", "location_bar",
+                    "search_url_bar", "search"]
+
 LOAD_FRAGMENTS = ["create one", "sign in"]
 
 # ------------------------------------------------------------- microsoft pages
@@ -340,15 +345,38 @@ class OutlookFlow(AppSearchFlow):
         self.auto.key(4)
         time.sleep(0.5)
 
+    def _page_fields(self) -> list[tuple[int, int]]:
+        """Centers of editable WEB-page inputs only.
+
+        Chrome's omnibox/url bar is an EditText itself and often sorts
+        first in the dump — without this filter the username got typed
+        into the address box instead of the signup form.
+        """
+        try:
+            xml = self.auto.dump_ui()
+        except Exception:  # noqa: BLE001
+            return []
+        out: list[tuple[int, int]] = []
+        for node in self.auto._all_nodes(xml):
+            if "EditText" not in node.get("class", ""):
+                continue
+            rid = (node.get("resource-id") or "").lower()
+            if any(fid in rid for fid in CHROME_FIELD_IDS):
+                continue
+            center = self.auto._bounds_center(node.get("bounds", ""))
+            if center:
+                out.append(center)
+        return out
+
     def _type_into_field(self, text: str, what: str,
                          fallback_frac: float = 0.42) -> None:
-        fields = self.auto.find_edit_texts()
+        fields = self._page_fields()
         if fields:
             fx, fy = fields[0]
         else:
             w, h = self.auto.resolution()
             fx, fy = w // 2, int(h * fallback_frac)
-        self.step("type", f"typing {what}")
+        self.step("type", f"typing {what} into field at {(fx, fy)}")
         self.auto.fill_field(fx, fy, text)
         self._hide_keyboard()
 
@@ -488,6 +516,13 @@ class OutlookFlow(AppSearchFlow):
             uname = fixed or random_username(8)
             self.username = uname
             self.outlook_address = f"{uname}@outlook.com"
+            if attempt == 1:
+                self.step("username",
+                          "waiting for the 'Create a Microsoft account' "
+                          "box ...")
+                Waiter(90, poll=2.0,
+                       label="waiting for the username box").until(
+                    self._page_fields, "username input box on the page")
             self.step("username",
                       f"[{attempt}/{attempts}] typing username "
                       f"'{uname}' ({self.outlook_address}) ...")
@@ -576,7 +611,7 @@ class OutlookFlow(AppSearchFlow):
                                 duration_ms=300, wait=1.0)
 
         # no native list opened — maybe a plain text input instead
-        fields = self.auto.find_edit_texts()
+        fields = self._page_fields() or self.auto.find_edit_texts()
         if fields:
             self.step("select",
                       f"no picker opened — typing '{variants[0]}' directly")
@@ -595,7 +630,7 @@ class OutlookFlow(AppSearchFlow):
         self._wait_for_any_text(NAME_FRAGMENTS, timeout)
         time.sleep(1.0)
 
-        edit_texts = self.auto.find_edit_texts()
+        edit_texts = self._page_fields()
         if len(edit_texts) >= 2:
             (f1x, f1y), (f2x, f2y) = edit_texts[0], edit_texts[1]
         elif len(edit_texts) == 1:
