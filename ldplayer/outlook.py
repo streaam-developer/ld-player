@@ -192,11 +192,12 @@ def create_signup_instance(console: LdConsole, name: str,
 
 # ------------------------------------------------------------ random values
 def random_username(length: int = 8) -> str:
-    """Random letter+number word like ``ab3k9x2m`` (always both kinds)."""
+    """Random letter+number word that always STARTS with a letter."""
     while True:
-        s = "".join(random.choices(string.ascii_lowercase + string.digits,
-                                   k=length))
-        if any(c.isalpha() for c in s) and any(c.isdigit() for c in s):
+        s = random.choice(string.ascii_lowercase) + "".join(
+            random.choices(string.ascii_lowercase + string.digits,
+                           k=length - 1))
+        if any(c.isdigit() for c in s):
             return s
 
 
@@ -223,10 +224,11 @@ def random_password(length: int = 16) -> str:
     return "".join(pw_list)
 
 
-def random_birthdate(min_age_years: int = 21) -> tuple[int, int, int]:
-    """(month 1-12, day 1-28, year) making the person > min_age_years old."""
-    year = time.localtime().tm_year - random.randint(
-        min_age_years + 1, min_age_years + 15)
+def random_birthdate(min_age_years: int = 21,
+                     max_age_years: int = 49) -> tuple[int, int, int]:
+    """(month 1-12, day 1-28, year) making the person min..max years old."""
+    age = random.randint(min_age_years, max_age_years)
+    year = time.localtime().tm_year - age
     month = random.randint(1, 12)
     day = random.randint(1, 28)
     return month, day, year
@@ -304,11 +306,14 @@ class OutlookFlow(AppSearchFlow):
                       label=f"looking for {' / '.join(texts)}").until(
             find_any, f"any of {texts} on screen")
 
-    def _find_exact(self, text: str) -> tuple[int, int] | None:
-        """Center of a node whose label equals `text` exactly (case-insensitive).
+    def _find_exact(self, text: str, min_size: int = 8
+                    ) -> tuple[int, int] | None:
+        """Center of a VISIBLE node whose label equals `text` exactly.
 
         Needed because short option values ("1", "15") substring-match their
-        neighbours inside native select lists.
+        neighbours inside native select lists, and offscreen/stale nodes can
+        carry the same label with zero-area bounds — tapping those is a no-op
+        (they showed up as taps at (0, 0)), so they are filtered out here.
         """
         try:
             xml = self.auto.dump_ui()
@@ -316,11 +321,22 @@ class OutlookFlow(AppSearchFlow):
             return None
         low = text.strip().lower()
         fallback: tuple[int, int] | None = None
-        for label, cx, cy, clickable in self.auto._text_nodes(xml):
-            if label.strip().lower() == low:
-                if clickable:
-                    return cx, cy
-                fallback = fallback or (cx, cy)
+        for node in self.auto._all_nodes(xml):
+            label = (node.get("text") or "").strip().lower() or \
+                (node.get("content-desc") or "").strip().lower()
+            if not label or label != low:
+                continue
+            b = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]",
+                         node.get("bounds", "") or "")
+            if not b:
+                continue
+            x1, y1, x2, y2 = map(int, b.groups())
+            if x2 - x1 < min_size or y2 - y1 < min_size:
+                continue          # zero-size / hidden duplicate
+            center = ((x1 + x2) // 2, (y1 + y2) // 2)
+            if node.get("clickable") == "true":
+                return center
+            fallback = fallback or center
         return fallback
 
     def _dismiss_popups(self) -> bool:
@@ -552,8 +568,14 @@ class OutlookFlow(AppSearchFlow):
         self._save_credentials()
 
     def set_birthday_web(self, min_age_years: int = 21,
+                         max_age_years: int = 49,
                          timeout: float = 90) -> None:
-        """Pick Month / Day / Year on the details page (>20 years back)."""
+        """Pick Month / Day and TYPE Year (age between min and max years).
+
+        The native day list only renders ~17 rows at once, so its picker is
+        scrolled until the target day becomes visible. The year goes straight
+        into its box by typing — far faster than wheeling through ~100 rows.
+        """
         self.step("birthday", "waiting for the Month/Day/Year boxes ...")
         hints_low = [h.lower() for h in BIRTHDAY_HINTS]
 
@@ -566,15 +588,37 @@ class OutlookFlow(AppSearchFlow):
             boxes_ready, "Month/Day/Year boxes on screen")
         time.sleep(1.0)
 
-        month, day, year = random_birthdate(min_age_years)
+        month, day, year = random_birthdate(min_age_years, max_age_years)
         month_name = calendar.month_name[month]
         self.step("birthday",
                   f"setting birth date: {month_name} {day}, {year} "
                   f"(age {time.localtime().tm_year - year})")
         self._pick_select("Month", [month_name, month_name[:3]])
         self._pick_select("Day", [str(day)])
-        self._pick_select("Year", [str(year)])
+        self._fill_year_box(str(year))
         self._tap_next()
+
+    def _fill_year_box(self, year: str) -> None:
+        """Type the birth year straight into the Year box.
+
+        Falls back to the scrollable native picker when typing does not
+        stick (e.g. the box turned out to be a select after all)."""
+        pos = self.auto.find_text("Year")
+        if not pos:
+            raise AutomationError("'Year' box not found")
+        self.step("year", f"tapping 'Year' box at {pos}, typing '{year}'...")
+        self.auto.tap(*pos, wait=1.5)
+        fields = self._page_fields()
+        if fields:
+            self.auto.fill_field(*fields[0], year)
+            self._hide_keyboard()
+            time.sleep(1.0)
+            if self._find_exact(year):
+                self.step("year", f"year '{year}' confirmed in the box")
+                return
+            self.step("year",
+                      "typed year not visible — falling back to picker ...")
+        self._pick_select("Year", [year])
 
     def _pick_select(self, hint: str, variants: list[str],
                      timeout: float = 60) -> str:
@@ -760,7 +804,8 @@ class OutlookFlow(AppSearchFlow):
             open_timeout: float = 90, username: str | None = None,
             password: str | None = None, first_name: str | None = None,
             last_name: str | None = None, recovery_email: str | None = None,
-            min_age_years: int = 21, flow_timeout: float = 1500) -> dict:
+            min_age_years: int = 21, max_age_years: int = 49,
+            flow_timeout: float = 1500) -> dict:
         """Run the whole flow once. Returns the step report."""
         started = time.time()
         self.open_instance_and_home(boot_timeout)
@@ -772,7 +817,8 @@ class OutlookFlow(AppSearchFlow):
             ("signup", lambda: self.start_signup()),
             ("username", lambda: self.enter_username(username)),
             ("password", lambda: self.enter_password(password)),
-            ("birthday", lambda: self.set_birthday_web(min_age_years)),
+            ("birthday",
+             lambda: self.set_birthday_web(min_age_years, max_age_years)),
             ("name", lambda: self.enter_name(first_name, last_name)),
             ("human", lambda: self.wait_human_verification()),
             ("protect", lambda: self.protect_account(recovery_email)),
@@ -848,6 +894,7 @@ def outlook_flow(console: LdConsole, adb: Adb, index: int | None = None,
                  recovery_email: str | None = None,
                  cf_worker_url: str = "", cf_worker_api_key: str = "",
                  otp_timeout: float = 240.0, min_age_years: int = 21,
+                 max_age_years: int = 49,
                  flow_timeout: float = 1500) -> dict:
     flow = OutlookFlow(console, adb, index=index, name=name,
                        package=package, cf_worker_url=cf_worker_url,
@@ -859,6 +906,7 @@ def outlook_flow(console: LdConsole, adb: Adb, index: int | None = None,
                       password=password, first_name=first_name,
                       last_name=last_name, recovery_email=recovery_email,
                       min_age_years=min_age_years,
+                      max_age_years=max_age_years,
                       flow_timeout=flow_timeout)
     flow.stay()
     return report

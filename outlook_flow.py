@@ -72,6 +72,8 @@ def main() -> int:
                         "used_emails.json)")
     p.add_argument("--min-age", type=int, default=21,
                    help="minimum birth-year age (default: 21, always >20)")
+    p.add_argument("--max-age", type=int, default=49,
+                   help="maximum birth-year age (default: 49)")
     p.add_argument("--otp-timeout", type=float, default=240,
                    help="seconds to wait for the code from the CF Worker")
     p.add_argument("--boot-timeout", type=float, default=900,
@@ -107,6 +109,7 @@ def main() -> int:
                      cf_worker_api_key=cfg.get("cf_worker_api_key", ""),
                      otp_timeout=args.otp_timeout,
                      min_age_years=args.min_age,
+                     max_age_years=args.max_age,
                      flow_timeout=args.flow_timeout)
     except KeyboardInterrupt:
         print("\ninterrupted — instance left running.", flush=True)
