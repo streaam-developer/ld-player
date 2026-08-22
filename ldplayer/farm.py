@@ -102,13 +102,24 @@ class SignupFarm:
         return Path(lc).parent / "vms" if lc else None
 
     def _instance_files_ok(self, index: int) -> bool:
-        """A created instance must at least have its VirtualBox descriptor;
-        a half-written folder is what later crashes LDPlayer with
-        WriteDataDenied on startup."""
+        """Verify a fresh instance actually got fully written.
+
+        NOTE: ``leidian.vbox`` and friends are only generated on *first
+        boot*, so a healthy un-booted instance has just its two disk
+        images. What ``add``/``modify`` must produce is:
+          vms\\leidianN\\data.vmdk + sdcard.vmdk
+          vms\\config\\leidianN.config      <- missing on half-written VMs,
+                                              which later crash startup with
+                                              WriteDataDenied
+        """
         vms = self._vms_root()
         if not vms:
             return True
-        return (vms / f"leidian{index}" / "leidian.vbox").is_file()
+        d = vms / f"leidian{index}"
+        cfg_file = vms / "config" / f"leidian{index}.config"
+        return ((d / "data.vmdk").is_file()
+                and (d / "sdcard.vmdk").is_file()
+                and cfg_file.is_file())
 
     def _force_remove_files(self, index: int) -> None:
         """Delete a leftover vms folder ldconsole's remove may leave behind."""
