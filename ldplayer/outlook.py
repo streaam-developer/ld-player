@@ -98,6 +98,10 @@ USERNAME_TAKEN_FRAGMENTS = ["already has that username", "try another",
 MANUAL_WAIT_TIMEOUT = 1800.0
 MANUAL_MISS_POLLS = 6
 
+#: the challenge's hold-button label variants ("press and hold"), tried
+#: in order — find_text is a substring match so the first hit wins
+HUMAN_HOLD_BUTTONS = ["Press & Hold", "Press and hold", "Hold"]
+
 FIRST_NAMES = ["Alex", "Jordan", "Taylor", "Casey", "Morgan", "Riley",
                "Jamie", "Drew", "Robin", "Skyler", "Aiden", "Leo", "Nina",
                "Sara", "Omar", "Liam", "Zoe", "Ethan", "Maya", "Noah"]
@@ -771,27 +775,39 @@ class OutlookFlow(AppSearchFlow):
                                 ) -> None:
         """'Let's prove you're human' page.
 
-        You TYPE the name of the button shown by the challenge in the
-        console; the script then press-and-HOLDS it over and over until
-        the page moves on. Leave the prompt empty to solve the puzzle
-        fully by hand instead."""
+        The challenge's 'press and hold' button is held down repeatedly
+        (adb long-press) until the page moves on. If the button cannot be
+        located, the console asks for its label or falls back to fully
+        manual solving."""
         self.step("human", "waiting for the human-verification page ...")
         self._wait_for_any_text(HUMAN_FRAGMENTS, timeout=120)
+        self.step("human_hold",
+                  f"challenge detected — holding '{HUMAN_HOLD_BUTTONS[0]}'...")
 
-        print(flush=True)
-        print("=" * 66, flush=True)
-        print(f"  [{self.inst.name}] HUMAN VERIFICATION page detected.",
-              flush=True)
-        button = input(
-            f"  [{self.inst.name}] Type the BUTTON NAME to hold "
-            f"(empty = solve by hand): ").strip()
-        print("=" * 66, flush=True)
+        # give the hold-button a short grace period to render before
+        # bothering the user
+        pos = None
+        for _ in range(10):
+            pos = self._find_any_button(HUMAN_HOLD_BUTTONS)
+            if pos:
+                break
+            time.sleep(1.0)
 
-        if button:
-            self._hold_button_until_page_changes(button, timeout)
+        if pos:
+            self._hold_button_until_page_changes(HUMAN_HOLD_BUTTONS, timeout)
             return
 
-        # ------------------------------------------------ fully manual path
+        # ------------------------------------------------ interactive fallback
+        self._manual_banner([
+            "ACTION NEEDED — puzzle page is showing but the hold-button",
+            f"({HUMAN_HOLD_BUTTONS[0]} / {HUMAN_HOLD_BUTTONS[1]}) was not found.",
+            "Type the exact BUTTON LABEL to hold (empty = solve by hand):",
+        ])
+        button = input(f"  [{self.inst.name}] button to hold: ").strip()
+        if button:
+            self._hold_button_until_page_changes([button], timeout)
+            return
+
         self.step("human_wait",
                   f"waiting for YOU to finish the puzzle "
                   f"(up to {timeout:.0f}s)...")
@@ -824,17 +840,23 @@ class OutlookFlow(AppSearchFlow):
             f"timed out waiting for manual human verification "
             f"({timeout:.0f}s)")
 
-    def _hold_button_until_page_changes(self, label: str,
+    def _find_any_button(self,
+                         labels: list[str]) -> tuple[int, int] | None:
+        """First on-screen match among `labels` (substring search)."""
+        for lbl in labels:
+            pos = self.auto.find_text(lbl)
+            if pos:
+                return pos
+        return None
+
+    def _hold_button_until_page_changes(self, labels: list[str],
                                         timeout: float) -> None:
-        """Press-and-HOLD `label` repeatedly until the challenge page goes.
+        """Press-and-HOLD the challenge button until the page moves on.
 
         The hold is a swipe-in-place with a long duration (the closest adb
         equivalent to keeping a finger pressed). The page is considered
         passed once 'protect your account' shows up or every HUMAN_FRAGMENT
         has been absent for MANUAL_MISS_POLLS consecutive polls."""
-        self.step("human_hold",
-                  f"press-and-hold '{label}' until the page changes "
-                  f"(up to {timeout:.0f}s)...")
         start = time.time()
         misses = 0          # polls without any HUMAN fragment
         not_found = 0       # polls without the button itself
@@ -855,13 +877,12 @@ class OutlookFlow(AppSearchFlow):
             else:
                 misses = 0
 
-            pos = self.auto.find_text(label)
+            pos = self._find_any_button(labels)
             if pos:
                 not_found = 0
                 presses += 1
                 if presses % 5 == 1:
-                    self.step("human_hold",
-                              f"hold #{presses} at {pos}")
+                    self.step("human_hold", f"hold #{presses} at {pos}")
                 # long-press = swipe from the point onto itself, slowly
                 self.auto.swipe(pos[0], pos[1], pos[0], pos[1],
                                 duration_ms=1500, wait=1.2)
@@ -874,11 +895,11 @@ class OutlookFlow(AppSearchFlow):
             now = time.time()
             if now - last_tick >= 20:
                 last_tick = now
-                print(f"  [{self.inst.name}] ... still holding '{label}' "
+                print(f"  [{self.inst.name}] ... still holding "
                       f"({timeout - (now - start):.0f}s left)", flush=True)
             time.sleep(1.0)
         raise AutomationError(
-            f"timed out holding '{label}' ({timeout:.0f}s)")
+            f"timed out holding '{labels[0]}' ({timeout:.0f}s)")
 
     def protect_account(self, recovery_email: str | None = None,
                         timeout: float = 90) -> None:
