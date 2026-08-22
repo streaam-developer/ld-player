@@ -991,6 +991,73 @@ class OutlookFlow(AppSearchFlow):
         self._type_into_field(code, f"verification code {code}")
         self._tap_next(timeout)
 
+    def read_facebook_otp_from_outlook(self, timeout: float = 240) -> str:
+        """Open the still-signed-in Outlook inbox in Chrome and extract
+        Facebook's confirmation code from the newest mail.
+
+        Used by signup_flow.py: Facebook mails its code to the freshly
+        created @outlook.com address, which the Cloudflare Worker never
+        sees — so we simply walk back to the webmail and read it."""
+        self.step("otp_mail",
+                  "opening the Outlook inbox to look for Facebook's "
+                  "code ...")
+        # Chrome may not be foreground anymore (Facebook is) — bring it up
+        self.inst.run_app(self.package)
+        time.sleep(2.5)
+
+        deadline = time.time() + timeout
+        last_nav = 0.0
+        opened_row = False
+        while time.time() < deadline:
+            # periodically reload the inbox so fresh mail shows up
+            if time.time() - last_nav >= 30:
+                try:
+                    self.navigate(START_URL, load_timeout=60)
+                except AutomationError as exc:
+                    self.step("otp_mail",
+                              f"inbox load issue ({exc}) — retrying ...")
+                last_nav = time.time()
+                opened_row = False
+                time.sleep(2.0)
+                continue
+
+            labels = self._screen_labels()
+            fb_row = None
+            for lbl in labels:
+                if "facebook" not in lbl:
+                    continue
+                fb_row = fb_row or lbl
+                m = re.search(r"(?<!\d)(\d{5})(?!\d)", lbl)
+                if m:
+                    self.step("otp_mail",
+                              f"Facebook confirmation code found: "
+                              f"{m.group(1)}")
+                    return m.group(1)
+
+            if fb_row and not opened_row:
+                # subject previews sometimes hide the digits — open mail
+                pos = (self.auto.find_text(fb_row[:24])
+                       or self.auto.find_text("Facebook"))
+                if pos:
+                    self.step("otp_mail",
+                              f"opening the Facebook mail at {pos} ...")
+                    self.auto.tap(*pos, wait=4.0)
+                    opened_row = True
+                continue
+
+            if opened_row:
+                # inside the mail but still no code — go back to the list
+                self.auto.back()
+                time.sleep(1.5)
+                opened_row = False
+                last_nav = 0.0          # force an early refresh
+                continue
+            time.sleep(2.5)
+
+        raise OtpTimeout(
+            f"no Facebook confirmation code appeared in the Outlook inbox "
+            f"within {timeout:.0f}s")
+
     def dismiss_passkey(self, timeout: float = 180) -> None:
         """"We could not create a passkey" -> Cancel; account is ready."""
         self.step("passkey", "waiting for the passkey page ...")

@@ -176,6 +176,9 @@ class FacebookFlow:
         #: directly in the emulator; automation only hands the step over
         self._manual_email = manual_email
         self._manual_otp = manual_otp
+        #: pluggable OTP source (e.g. read the code from the Outlook
+        #: inbox in Chrome) — takes precedence over the CF Worker when set
+        self._otp_provider = None
 
     # ---------------------------------------------------------------- steps
     def step(self, tag: str, msg: str) -> None:
@@ -911,18 +914,28 @@ class FacebookFlow:
         return "".join(pw_list)
 
     def _save_credentials(self) -> None:
-        """Append ``email|password`` to the credentials file."""
+        """Append ``email|password`` to facebook.txt and the shared
+        raw.txt feed."""
         if not self._email or not self._password:
             self.step("save_warn", "email or password empty — skipping save")
             return
         line = f"{self._email}|{self._password}\n"
-        dest = Path(__file__).resolve().parent.parent / CREDENTIALS_FILE
+        root = Path(__file__).resolve().parent.parent
+        dest = root / "facebook.txt"
         try:
             with _FILE_LOCK:
                 with open(dest, "a", encoding="utf-8") as fh:
                     fh.write(line)
             self.step("save_creds",
                       f"saved to {dest}: {self._email}|{'*' * len(self._password)}")
+        except OSError as exc:
+            self.step("save_warn", f"could not write facebook.txt: {exc}")
+        # keep the shared registry (used by emails.py seeding) in sync
+        try:
+            with _FILE_LOCK:
+                with open(root / CREDENTIALS_FILE, "a",
+                          encoding="utf-8") as fh:
+                    fh.write(line)
         except OSError as exc:
             self.step("save_warn", f"could not write credentials file: {exc}")
 
@@ -1002,7 +1015,17 @@ class FacebookFlow:
 
         # --- Try to fetch + enter the OTP automatically ---
         otp_entered = False
-        if self._cf_worker_url and self._cf_worker_api_key and self._email:
+        if self._otp_provider is not None:
+            try:
+                self.step("otp_fetch",
+                          "fetching OTP from the Outlook inbox ...")
+                code = self._otp_provider()
+                self._enter_otp_code(code)
+                otp_entered = True
+            except Exception as exc:  # noqa: BLE001
+                self.step("otp_error",
+                          f"Outlook OTP fetch failed ({exc}) — continuing")
+        elif self._cf_worker_url and self._cf_worker_api_key and self._email:
             try:
                 self.step("otp_fetch",
                           f"polling CF Worker for OTP ({self._email}) ...")

@@ -1,75 +1,47 @@
-"""Facebook signup automation — run directly from the command line.
+"""Combined Outlook -> Facebook signup pipeline.
 
-Auto mode (default):
-    python signup_flow.py [--workers 1] [--accounts N] [--template NAME|N]
+One LDPlayer instance, two phases:
 
-  Keeps `--workers` (default 1) emulator signup(s) running in parallel, each
-  cycle:
-    1. creates a new LDPlayer instance named ``auto_<ts><nn>`` — a CLONE of
-       --template when given (Facebook comes pre-installed), else blank
-    2. writes a unique random mobile profile into it (IMEI/IMSI/ICCID,
-       Android ID, MAC, phone number, manufacturer/model, resolution)
-    3. launches it and runs the Facebook signup flow
-    4. SUCCESS -> the instance is KEPT (account lives inside it) and logged
-       to saved_instances.txt
-    5. human-verification block / failure / error -> the instance is
-       quit and DELETED
+  PHASE 1 — OUTLOOK (ldplayer/outlook.py)
+    Creates a FRESH instance (4 CPU / 4 GB RAM, random mobile identity),
+    opens Chrome, dismisses its first-run screens and signs up a new
+    Microsoft/Outlook account. Credentials land in outlook.txt
+    (email|password|recovery) the moment the account is ready.
 
-  Runs until --accounts successes are reached, or forever until Ctrl+C
-  (first Ctrl+C waits for running signups to finish; second force-quits).
+  PHASE 2 — FACEBOOK (ldplayer/facebook.py)
+    Returns to the launcher, installs the Facebook APK if missing and
+    runs the adaptive signup loop with:
+      * email     = the @outlook.com address created in phase 1
+      * OTP       = read straight from the signed-in Outlook inbox in
+                    Chrome (the script hops back to Chrome, finds the
+                    Facebook mail, extracts the code, then returns to
+                    Facebook to type it)
+    On success facebook.txt gets email|password.
 
-SETTINGS TEMPLATE: --settings-from <name|index> exports that instance's
-full settings (CPU/RAM, resolution, fps, window size, ...) into
-ld_settings.json and every new signup instance gets them applied on top of
-its random device identity. Once exported, plain runs keep using it until
-you delete ld_settings.json or re-export.
-
-MANUAL INPUT (default): when the email page appears the script pauses and
-YOU type the email in the emulator and tap Next; same for the confirmation
-code — you enter it yourself and tap Next. The script detects that you
-finished and continues automatically. Pass --auto-input to make the bot
-type both itself again.
-
-Single-instance mode (manual runs on an existing emulator):
-    python signup_flow.py --index N | --name NAME [--hold]
-        [--first-name FN] [--last-name LN]
-
-Flow inside every signup:
-  1. open the instance, wait until the apps grid (launcher) is showing
-  2. open the Facebook app
-  3. wait for "Create new account", tap it, wait there
-  4. tap "Create new account" again on the form
-  5. wait for the Contacts permission prompt and tap "Allow"
-  6. enter first/last name, tap Next
-  7. open birthday picker, scroll year >20 years back, tap Set, tap Next
-  8. select Male, tap Next
-  9. tap "Sign up with email", then WAIT while YOU enter your email and
-     tap Next (--auto-input types a random one instead)
-  10. create password, tap Next, save email|password to raw.txt
-  11. tap "I agree" on terms screen, wait
-  12. WAIT while YOU enter the confirmation code and tap Next
-      (--auto-input fetches it from the CF Worker instead)
-
-Requires cf_worker_url + cf_worker_api_key in config.json (only needed
-for --auto-input mode).
-Use --hold to pause after step 3 (press Enter to continue).
+Run:
+    python signup_flow.py                 # fresh instance every run
+    python signup_flow.py --template X    # clone instance X instead
+    python signup_flow.py --index N       # reuse an existing instance
 """
 
 from __future__ import annotations
 
 import argparse
+import random
 import sys
+import time
 import traceback
 
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+from ldplayer.adb import Adb
 from ldplayer.config import find_ldconsole, load_config
 from ldplayer.console import LdConsole
-from ldplayer.adb import Adb
-from ldplayer.facebook import signup_flow
-from ldplayer.farm import SETTINGS_FILE, SignupFarm, export_instance_settings
+from ldplayer.facebook import FacebookFlow, find_facebook_apk
+from ldplayer.outlook import (FIRST_NAMES, LAST_NAMES, OutlookFlow,
+                              create_signup_instance, new_instance_name)
 
 
 def main() -> int:
@@ -78,127 +50,128 @@ def main() -> int:
     if hasattr(sys.stderr, "reconfigure"):
         sys.stderr.reconfigure(line_buffering=True)
 
-    p = argparse.ArgumentParser(description=__doc__,
-                                formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--index", type=int, help="instance index "
-                                            "(enables single-instance mode)")
-    p.add_argument("--name", help="instance name "
-                                  "(enables single-instance mode)")
-    p.add_argument("--workers", type=int, default=1,
-                   help="auto mode: parallel signup instances (default: 1)")
-    p.add_argument("--accounts", type=int, default=0,
-                   help="auto mode: stop after this many successful "
-                        "signups (0 = keep going until Ctrl+C)")
-    p.add_argument("--keep-open", action="store_true",
-                   help="auto mode: leave successful instances running "
-                        "instead of closing them")
-    p.add_argument("--auto-input", action="store_true",
-                   help="let the bot type the email and confirmation code "
-                        "by itself (default: YOU type them in the emulator "
-                        "and tap Next)")
+    p = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--index", type=int,
+                   help="run on an EXISTING instance instead of creating "
+                        "a fresh one")
+    p.add_argument("--name",
+                   help="run on an EXISTING instance instead of creating "
+                        "a fresh one")
     p.add_argument("--template",
-                   help="auto mode: name or index of an existing instance "
-                        "to CLONE for every new signup instance — it should "
-                        "already have Facebook installed and NO accounts "
-                        "(omitted = create blank instances)")
-    p.add_argument("--settings-from",
-                   help="auto mode: name or index of an instance whose full "
-                        "settings (CPU/RAM, resolution, fps, window size, "
-                        "...) should be exported to ld_settings.json and "
-                        "applied to every NEW signup instance (device "
-                        "identity stays random). Re-run to refresh the "
-                        "export; without it, an existing ld_settings.json "
-                        "is used as-is")
-    p.add_argument("--package", default="com.facebook.katana")
+                   help="clone THIS instance instead of creating a blank "
+                        "one (should have Chrome ready)")
+    p.add_argument("--prefix", default="otl",
+                   help="name prefix for the fresh instance (default: otl)")
     p.add_argument("--apk",
-                   help="path to the Facebook apk/apkm/xapk to install if "
-                        "Facebook is not installed yet (auto-detected from "
-                        "the working directory otherwise)")
-    p.add_argument("--step-wait", type=float, default=3.0,
-                   help="pause between steps (seconds)")
-    p.add_argument("--hold", action="store_true",
-                   help="single-instance mode: pause after the first "
-                        "'Create new account' tap")
-    p.add_argument("--no-grant", action="store_true",
-                   help="skip pre-granting contacts/location permissions")
-    p.add_argument("--boot-timeout", type=int, default=900,
-                   help="seconds to wait for boot + launcher (first boot of "
-                        "a fresh instance is slow; 3 at once slower still)")
-    p.add_argument("--first-name",
-                   help="fixed first name (auto mode picks random names "
-                        "when omitted)")
-    p.add_argument("--last-name",
-                   help="fixed last name (auto mode picks random names "
-                        "when omitted)")
-    p.add_argument("--otp-timeout", type=float, default=120,
-                   help="seconds to wait for OTP code from CF Worker")
-    p.add_argument("--flow-timeout", type=float, default=1500,
-                   help="seconds allowed for one full signup flow")
+                   help="Facebook apk/apkm/xapk path (default: newest "
+                        "found in the working directory)")
+    p.add_argument("--first-name", help="fixed first name (default: random)")
+    p.add_argument("--last-name", help="fixed last name (default: random)")
+    p.add_argument("--recovery-email",
+                   help="@dailykhabar.bond address for Outlook's 'protect "
+                        "your account' step")
+    p.add_argument("--min-age", type=int, default=21)
+    p.add_argument("--max-age", type=int, default=49)
+    p.add_argument("--fb-otp-timeout", type=float, default=300,
+                   help="seconds to wait for Facebook's code inside the "
+                        "Outlook inbox (default: 300)")
+    p.add_argument("--boot-timeout", type=float, default=900)
+    p.add_argument("--flow-timeout", type=float, default=1800,
+                   help="seconds allowed PER phase")
     args = p.parse_args()
 
     console = LdConsole(find_ldconsole())
     cfg = load_config()
     adb = Adb(cfg["adb"])
 
-    # manual input (you type email + code) unless --auto-input is given
-    manual = not args.auto_input
+    first = args.first_name or random.choice(FIRST_NAMES)
+    last = args.last_name or random.choice(LAST_NAMES)
 
-    # settings template: fresh export from --settings-from, else the
-    # existing ld_settings.json export if one was saved before
-    settings_file = None
     try:
-        if args.settings_from:
-            dest, exported = export_instance_settings(console,
-                                                      args.settings_from)
-            print(f"exported {len(exported)} settings from "
-                  f"'{args.settings_from}' to {dest}", flush=True)
-            settings_file = dest
-        elif SETTINGS_FILE.is_file():
-            settings_file = SETTINGS_FILE
-    except Exception as exc:
-        print(f"\nERROR: {exc}", flush=True)
-        return 1
+        # ================================================== PHASE 1: outlook
+        index = args.index
+        name = args.name
+        if index is None and name is None:
+            name = new_instance_name(args.prefix, console)
+            inst = create_signup_instance(console, name,
+                                          template=args.template)
+            name = inst.name
+            print(f"[{name}] PHASE 1/2 — new instance created "
+                  f"(4 CPU / 4 GB), starting OUTLOOK signup ...", flush=True)
 
-    # ------------------------------------------------------- auto farm mode
-    if args.index is None and args.name is None:
-        try:
-            farm = SignupFarm(
-                console, adb, workers=args.workers, accounts=args.accounts,
-                package=args.package, apk_path=args.apk,
-                cf_worker_url=cfg.get("cf_worker_url", ""),
-                cf_worker_api_key=cfg.get("cf_worker_api_key", ""),
-                otp_timeout=args.otp_timeout,
-                boot_timeout=args.boot_timeout,
-                flow_timeout=args.flow_timeout,
-                quit_on_success=not args.keep_open,
-                manual_input=manual,
-                template=args.template,
-                settings_file=settings_file)
-            ok, bad = farm.run()
-        except Exception as exc:
-            print(f"\nERROR: {exc}", flush=True)
-            traceback.print_exc()
+        oflow = OutlookFlow(console, adb, index=index, name=name,
+                            cf_worker_url=cfg.get("cf_worker_url", ""),
+                            cf_worker_api_key=cfg.get("cf_worker_api_key", ""))
+        oflow.run(boot_timeout=args.boot_timeout,
+                  username=None, password=None,
+                  first_name=first, last_name=last,
+                  recovery_email=args.recovery_email,
+                  min_age_years=args.min_age, max_age_years=args.max_age,
+                  flow_timeout=args.flow_timeout)
+
+        if not oflow.success or not oflow.outlook_address:
+            raise RuntimeError("outlook phase did not complete — aborting")
+
+        print(f"\n[{oflow.inst.name}] OUTLOOK READY — "
+              f"{oflow.outlook_address} (saved to outlook.txt)\n",
+              flush=True)
+
+        # ================================================ PHASE 2: facebook
+        print(f"[{oflow.inst.name}] back to the launcher ...", flush=True)
+        oflow.auto.home()
+        time.sleep(2)
+
+        fflow = FacebookFlow(console, adb, index=oflow.inst.index)
+
+        def otp_provider() -> str:
+            """Facebook's code arrives AT the new outlook address — read
+            it from the inbox in Chrome, then hop back into Facebook."""
+            code = oflow.read_facebook_otp_from_outlook(
+                timeout=args.fb_otp_timeout)
+            print(f"[{oflow.inst.name}] hopping back into Facebook ...",
+                  flush=True)
+            fflow.inst.run_app(fflow.package)
+            time.sleep(4)
+            return code
+
+        fflow._otp_provider = otp_provider
+
+        print(f"[{oflow.inst.name}] PHASE 2/2 — FACEBOOK signup "
+              f"(email: {oflow.outlook_address}) ...", flush=True)
+        apk_path = args.apk or str(find_facebook_apk())
+        fflow.run(apk_path=apk_path,
+                  first_name=first, last_name=last,
+                  email=oflow.outlook_address,
+                  boot_timeout=args.boot_timeout,
+                  flow_timeout=args.flow_timeout)
+
+        if fflow.success == "success":
+            print(f"\n[{oflow.inst.name}] " + "=" * 60, flush=True)
+            print(f"[{oflow.inst.name}] PIPELINE COMPLETE", flush=True)
+            print(f"[{oflow.inst.name}]   outlook  : {oflow.outlook_address}"
+                  f"  -> outlook.txt", flush=True)
+            print(f"[{oflow.inst.name}]   facebook : {fflow._email}"
+                  f"  -> facebook.txt", flush=True)
+            print(f"[{oflow.inst.name}] " + "=" * 60 + "\n", flush=True)
+        else:
+            print(f"\n[{oflow.inst.name}] facebook phase finished with "
+                  f"status '{fflow.success or 'error'}' — check the log "
+                  f"above.", flush=True)
             return 1
-        print(f"signup farm finished — {ok} saved, {bad} deleted")
-        return 0
 
-    # ----------------------------------------------- single instance (manual)
-    try:
-        signup_flow(console, adb, index=args.index, name=args.name,
-                    package=args.package, step_wait=args.step_wait,
-                    hold=args.hold, grant_perms=not args.no_grant,
-                    boot_timeout=args.boot_timeout, apk_path=args.apk,
-                    first_name=args.first_name or "Alex",
-                    last_name=args.last_name or "Johnson",
-                    cf_worker_url=cfg.get("cf_worker_url", ""),
-                    cf_worker_api_key=cfg.get("cf_worker_api_key", ""),
-                    otp_timeout=args.otp_timeout,
-                    manual_email=manual, manual_otp=manual)
-    except Exception as exc:
+        print(f"[{oflow.inst.name}] Instance stays open — Ctrl+C to stop.",
+              flush=True)
+        while True:
+            time.sleep(30)
+    except KeyboardInterrupt:
+        print("\ninterrupted — instance left running.", flush=True)
+        return 0
+    except Exception as exc:  # noqa: BLE001
         print(f"\nERROR: {exc}", flush=True)
         traceback.print_exc()
         return 1
-    print("signup flow finished")
     return 0
 
 
