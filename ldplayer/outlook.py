@@ -83,7 +83,10 @@ CODE_FRAGMENTS = ["enter the code", "we sent a code", "enter code",
 PASSKEY_FRAGMENT = "passkey"
 CANCEL_BUTTONS = ["Cancel", "Not now"]
 
-POPUP_BUTTONS = ["Accept all", "Accept", "I agree"]
+#: ONLY unambiguous cookie-consent buttons. Generic words like "Accept" or
+#: "I agree" also appear as normal LINKS in Microsoft's signup footers —
+#: tapping them navigates away mid-flow, so they must never be touched.
+POPUP_BUTTONS = ["Accept all"]
 
 #: username-taken wording shown when the picked address already exists
 USERNAME_TAKEN_FRAGMENTS = ["already has that username", "try another",
@@ -226,11 +229,15 @@ def random_password(length: int = 16) -> str:
 
 def random_birthdate(min_age_years: int = 21,
                      max_age_years: int = 49) -> tuple[int, int, int]:
-    """(month 1-12, day 1-28, year) making the person min..max years old."""
+    """(month 1-12, day 5-14, year) making the person min..max years old.
+
+    Day stays within 5-14 because Chrome's native day list only renders
+    the first ~17 rows — this range is always visible without scrolling.
+    """
     age = random.randint(min_age_years, max_age_years)
     year = time.localtime().tm_year - age
     month = random.randint(1, 12)
-    day = random.randint(1, 28)
+    day = random.randint(5, 14)
     return month, day, year
 
 
@@ -349,13 +356,50 @@ class OutlookFlow(AppSearchFlow):
                 return True
         return False
 
-    def _tap_next(self, timeout: float = 30) -> tuple[int, int]:
-        """Wait for a Next button and tap it."""
-        t, pos = self._wait_for_any_text(NEXT_BUTTONS, timeout,
-                                         dismiss_popups=False)
-        self.step("next", f"clicking '{t}' at {pos}")
-        self.auto.tap(*pos, wait=2.0)
-        return pos
+    def _tap_next(self, timeout: float = 45) -> tuple[int, int]:
+        """Wait for a Next button and tap it.
+
+        Microsoft forms keep Next below the fold (birthday details page
+        needs a scroll first), so when it is not visible we hide the
+        keyboard and scroll the page until the button shows up.
+
+        Deliberately does NOT dismiss popups first: the signup pages carry
+        footer links ("...agree...") that a greedy dismissal would tap,
+        navigating away from the form."""
+        deadline = time.time() + timeout
+        hid_keyboard = False
+        scrolls = 0
+        while time.time() < deadline:
+            pos = self.auto.find_text("Next")
+            if pos:
+                self.step("next", f"clicking 'Next' at {pos}")
+                self.auto.tap(*pos, wait=2.0)
+                return pos
+            if not hid_keyboard:
+                self._hide_keyboard()
+                hid_keyboard = True
+                continue
+            scrolls += 1
+            if scrolls % 4 == 0:
+                self.auto.scroll_up()     # bounced past it — come back
+            else:
+                self.auto.scroll_down()
+            time.sleep(0.8)
+        raise AutomationError(f"'Next' button not found within "
+                              f"{timeout:.0f}s")
+
+    def _field_shows(self, value: str) -> bool:
+        """True when any editable field currently holds exactly `value`."""
+        try:
+            xml = self.auto.dump_ui()
+        except Exception:  # noqa: BLE001
+            return False
+        low = value.strip().lower()
+        for node in self.auto._all_nodes(xml):
+            if "EditText" in node.get("class", "") and \
+                    (node.get("text") or "").strip().lower() == low:
+                return True
+        return False
 
     def _hide_keyboard(self) -> None:
         self.auto.key(4)
@@ -601,8 +645,9 @@ class OutlookFlow(AppSearchFlow):
     def _fill_year_box(self, year: str) -> None:
         """Type the birth year straight into the Year box.
 
-        Falls back to the scrollable native picker when typing does not
-        stick (e.g. the box turned out to be a select after all)."""
+        The first keystrokes can race the focus/keyboard animation, so the
+        fill is retried and its result confirmed before falling back to the
+        scrollable native picker."""
         pos = self.auto.find_text("Year")
         if not pos:
             raise AutomationError("'Year' box not found")
@@ -610,14 +655,19 @@ class OutlookFlow(AppSearchFlow):
         self.auto.tap(*pos, wait=1.5)
         fields = self._page_fields()
         if fields:
-            self.auto.fill_field(*fields[0], year)
-            self._hide_keyboard()
-            time.sleep(1.0)
-            if self._find_exact(year):
-                self.step("year", f"year '{year}' confirmed in the box")
-                return
-            self.step("year",
-                      "typed year not visible — falling back to picker ...")
+            for attempt in (1, 2):
+                self.auto.fill_field(*fields[0], year)
+                self._hide_keyboard()
+                deadline = time.time() + 6
+                while time.time() < deadline:
+                    if self._find_exact(year) or self._field_shows(year):
+                        self.step("year",
+                                  f"year '{year}' confirmed in the box")
+                        return
+                    time.sleep(1.2)
+                self.step("year",
+                          f"attempt {attempt} did not stick — refilling...")
+            self.step("year", "typing failed — falling back to picker ...")
         self._pick_select("Year", [year])
 
     def _pick_select(self, hint: str, variants: list[str],
