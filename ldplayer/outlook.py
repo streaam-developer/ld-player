@@ -94,6 +94,10 @@ USERNAME_TAKEN_FRAGMENTS = ["already has that username", "try another",
                             "isn't available", "isn’t available",
                             "not available", "someone already"]
 
+#: fragments identifying the EMAIL-ENTRY (username) page of the signup
+USERNAME_FRAGMENTS = ["outlook.com", "get a new email address",
+                      "create email"]
+
 #: manual mode (human verification): how long we wait for the user to solve
 #: the captcha and how many consecutive absent-polls mean "moved on"
 MANUAL_WAIT_TIMEOUT = 1800.0
@@ -1098,53 +1102,136 @@ class OutlookFlow(AppSearchFlow):
             self.step("save_warn", f"could not write credentials file: {exc}")
 
     # --------------------------------------------------------------- runner
+    def _classify_screen(self, joined: str) -> str:
+        """Name the signup page currently on screen.
+
+        Checked most-specific first; the first hit wins. Returns one of:
+        passkey | human | code | protect | birthday | password | name |
+        username | signup | unknown."""
+        j = joined.lower()
+        if PASSKEY_FRAGMENT in j:
+            return "passkey"
+        if any(f.lower() in j for f in HUMAN_FRAGMENTS):
+            return "human"
+        if any(f.lower() in j for f in CODE_FRAGMENTS):
+            return "code"
+        if any(f.lower() in j for f in PROTECT_FRAGMENTS):
+            return "protect"
+        if all(h.lower() in j for h in BIRTHDAY_HINTS):
+            return "birthday"
+        if any(f.lower() in j for f in PASSWORD_HEADERS):
+            return "password"
+        if any(f.lower() in j for f in NAME_FRAGMENTS):
+            return "name"
+        if (any(f.lower() in j for f in USERNAME_FRAGMENTS)
+                or any(f.lower() in j for f in USERNAME_TAKEN_FRAGMENTS)):
+            return "username"
+        if (any(f.lower() in j for f in LOAD_FRAGMENTS)
+                or self.auto.find_by_resource_id(URL_BAR_IDS[0])):
+            return "signup"
+        return "unknown"
+
     def run(self, boot_timeout: float = 600, search_timeout: float = 180,
             open_timeout: float = 90, username: str | None = None,
             password: str | None = None, first_name: str | None = None,
             last_name: str | None = None, recovery_email: str | None = None,
             min_age_years: int = 21, max_age_years: int = 49,
             flow_timeout: float = 1500) -> dict:
-        """Run the whole flow once. Returns the step report."""
+        """Adaptive signup loop.
+
+        Instead of a rigid stage order, every cycle classifies whatever
+        page Chrome currently shows and runs that page's handler — so
+        reordered pages, extra interstitials and mid-flow resumes all
+        work. Handlers that fail are retried; a completed page that keeps
+        re-showing is re-handled once the click clearly did not land.
+        """
         started = time.time()
         self.open_instance_and_home(boot_timeout)
         self.open_chrome(search_timeout, open_timeout)
         self.handle_first_run()
         self.navigate()
 
-        stages = [
-            ("signup", lambda: self.start_signup()),
-            ("username", lambda: self.enter_username(username)),
-            ("password", lambda: self.enter_password(password)),
-            ("birthday",
-             lambda: self.set_birthday_web(min_age_years, max_age_years)),
-            ("name", lambda: self.enter_name(first_name, last_name)),
-            ("human", lambda: self.wait_human_verification()),
-            ("protect", lambda: self.protect_account(recovery_email)),
-            ("code", lambda: self.enter_verification_code()),
-            ("passkey", lambda: self.dismiss_passkey()),
-        ]
+        handlers = {
+            "signup": lambda: self.start_signup(),
+            "username": lambda: self.enter_username(username),
+            "password": lambda: self.enter_password(password),
+            "birthday":
+                lambda: self.set_birthday_web(min_age_years, max_age_years),
+            "name": lambda: self.enter_name(first_name, last_name),
+            "human": lambda: self.wait_human_verification(),
+            "protect": lambda: self.protect_account(recovery_email),
+            "code": lambda: self.enter_verification_code(),
+            "passkey": lambda: self.dismiss_passkey(),
+        }
         done: set[str] = set()
+        visits: dict[str, int] = {}
+        stall = 0
+        deadline = time.time() + flow_timeout
 
-        while len(done) < len(stages) and time.time() - started < flow_timeout:
-            tag, handler = stages[len(done)]
-            try:
-                self.step(tag, f">> stage '{tag}' starting")
-                handler()
-            except KeyboardInterrupt:
-                raise
-            except Exception as exc:  # noqa: BLE001
-                self.step(f"{tag}_error",
-                          f"stage '{tag}' failed: {exc}")
-                if isinstance(exc, OtpTimeout):
+        while time.time() < deadline:
+            joined = self.screen_text()
+            self._dismiss_popups()
+            screen = self._classify_screen(joined)
+            visits[screen] = visits.get(screen, 0) + 1
+
+            if screen == "passkey":
+                self.step(screen, f">> handling '{screen}' page")
+                try:
+                    handlers["passkey"]()
+                except OtpTimeout:
                     raise
-                # retry the same stage after things settle; abort when one
-                # stage eats half the overall budget
-                if time.time() - started > flow_timeout / 2:
-                    raise
+                break                       # success flag set by handler
+
+            if screen == "unknown":
+                stall += 1
                 self._dismiss_popups()
-                time.sleep(3)
+                # long stalls usually mean a dead/blank tab — reload
+                if stall % 12 == 6:
+                    self.step("stall",
+                              f"unrecognised screen ({stall} consecutive) "
+                              f"— reloading the start page ...")
+                    try:
+                        self.navigate(START_URL, load_timeout=60)
+                    except AutomationError:
+                        pass
+                time.sleep(2)
                 continue
-            done.add(tag)
+
+            handler = handlers.get(screen)
+            if screen not in done:
+                self.step(screen,
+                          f">> handling '{screen}' page "
+                          f"(visit {visits[screen]})")
+                try:
+                    handler()
+                except KeyboardInterrupt:
+                    raise
+                except OtpTimeout:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    self.step(f"{screen}_error",
+                              f"'{screen}' handler failed: {exc}")
+                    if time.time() - started > flow_timeout / 2:
+                        raise
+                    self._dismiss_popups()
+                    time.sleep(3)
+                    continue            # retry the same page next cycle
+                done.add(screen)
+                visits[screen] = 0
+                stall = 0
+            else:
+                # page finished but still visible — either the click has
+                # not landed yet (give it a moment) or it never registered
+                # (re-handle after a few consecutive sightings)
+                if visits[screen] >= 5:
+                    self.step("recheck",
+                              f"'{screen}' still showing after completion "
+                              f"— handling again")
+                    done.discard(screen)
+                    visits[screen] = 0
+                else:
+                    stall += 1
+                    time.sleep(1.5)
 
         if not self.success:
             raise AutomationError(
