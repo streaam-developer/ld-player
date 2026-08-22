@@ -181,8 +181,10 @@ def apply_profile(console: LdConsole, name: str | None = None,
         pnumber=profile.pnumber, imei=profile.imei, imsi=profile.imsi,
         simserial=profile.simserial, androidid=profile.androidid,
         mac=profile.mac,
-        autorotate=0 if light else None,
-        lockwindow=1 if light else None,
+        # auto-rotate ON, window never locked — the player window follows
+        # the app's orientation and can be freely resized
+        autorotate=1,
+        lockwindow=0,
         root=1 if root else None,
     )
     if not res.ok:

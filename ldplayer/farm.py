@@ -232,41 +232,6 @@ class SignupFarm:
             self._log(f"could not enable adb on leidian{index}: {exc}")
             return False
 
-    def _fix_window_shape(self, index: int) -> bool:
-        """Give a fresh instance a phone-shaped desktop window.
-
-        Blank ``add`` instances store no window geometry
-        (basicSettings.width/height/realWidth/realHeigh are all 0), so the
-        player window opens at LDPlayer's landscape-ish default even though
-        Android itself runs 720x1280 portrait. Writing an explicit geometry
-        here makes the window open tall like a phone.
-        """
-        vms = self._vms_root()
-        cfg_file = vms / "config" / f"leidian{index}.config" if vms else None
-        if not cfg_file or not cfg_file.is_file():
-            return False
-        try:
-            data = json.loads(cfg_file.read_text(encoding="utf-8"))
-            res = data.get("advancedSettings.resolution") or {}
-            w = int(res.get("width", 720))
-            h = int(res.get("height", 1280))
-            # desktop window scaled to fit a ~1080p screen (with margin)
-            scale = min(1.0, 1000.0 / max(h, 1))
-            win_w = max(1, int(w * scale))
-            win_h = max(1, int(h * scale))
-            data["basicSettings.width"] = w          # client area = Android res
-            data["basicSettings.height"] = h
-            data["basicSettings.realWidth"] = win_w + 20   # outer window incl.
-            data["basicSettings.realHeigh"] = win_h + 35   # borders/titlebar
-            tmp = cfg_file.with_suffix(".tmp")
-            tmp.write_text(json.dumps(data, indent=4, ensure_ascii=False),
-                           encoding="utf-8")
-            tmp.replace(cfg_file)
-            return True
-        except (OSError, ValueError, TypeError) as exc:
-            self._log(f"could not set window shape on leidian{index}: {exc}")
-            return False
-
     def _resolve_template(self) -> tuple[int, str]:
         """``--template`` accepts an index or a name -> (index, name)."""
         raw = str(self.template).strip()
@@ -361,10 +326,8 @@ class SignupFarm:
                 raise RuntimeError(
                     f"could not enable adbDebug on '{name}' "
                     f"(index {inst.index}) — discarding it")
-            # open the player window tall like a phone, never landscape
-            self._fix_window_shape(inst.index)
-            # then give it the saved settings template (CPU/RAM, fps,
-            # window geometry, ...) — identity stays random
+            # give it the saved settings template (CPU/RAM, fps, window
+            # geometry, ...) — identity stays random
             self._apply_settings(inst.index, instance_name=name)
             mode = "cloned from template" if self._template_target else \
                 "created blank"
