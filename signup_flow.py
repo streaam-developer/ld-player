@@ -1,11 +1,12 @@
 """Facebook signup automation — run directly from the command line.
 
 Auto mode (default):
-    python signup_flow.py [--workers 1] [--accounts N]
+    python signup_flow.py [--workers 1] [--accounts N] [--template NAME|N]
 
   Keeps `--workers` (default 1) emulator signup(s) running in parallel, each
   cycle:
-    1. creates a brand-new LDPlayer instance named ``auto_<ts><nn>``
+    1. creates a new LDPlayer instance named ``auto_<ts><nn>`` — a CLONE of
+       --template when given (Facebook comes pre-installed), else blank
     2. writes a unique random mobile profile into it (IMEI/IMSI/ICCID,
        Android ID, MAC, phone number, manufacturer/model, resolution)
     3. launches it and runs the Facebook signup flow
@@ -89,6 +90,11 @@ def main() -> int:
                    help="let the bot type the email and confirmation code "
                         "by itself (default: YOU type them in the emulator "
                         "and tap Next)")
+    p.add_argument("--template",
+                   help="auto mode: name or index of an existing instance "
+                        "to CLONE for every new signup instance — it should "
+                        "already have Facebook installed and NO accounts "
+                        "(omitted = create blank instances)")
     p.add_argument("--package", default="com.facebook.katana")
     p.add_argument("--apk",
                    help="path to the Facebook apk/apkm/xapk to install if "
@@ -135,7 +141,8 @@ def main() -> int:
                 boot_timeout=args.boot_timeout,
                 flow_timeout=args.flow_timeout,
                 quit_on_success=not args.keep_open,
-                manual_input=manual)
+                manual_input=manual,
+                template=args.template)
             ok, bad = farm.run()
         except Exception as exc:
             print(f"\nERROR: {exc}", flush=True)

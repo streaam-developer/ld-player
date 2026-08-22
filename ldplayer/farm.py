@@ -62,7 +62,8 @@ class SignupFarm:
                  install_timeout: float = 840.0,
                  flow_timeout: float = 1500.0,
                  quit_on_success: bool = True,
-                 manual_input: bool = False):
+                 manual_input: bool = False,
+                 template: str | None = None):
         self.console = console
         self.adb = adb
         self.workers = max(1, workers)
@@ -79,6 +80,11 @@ class SignupFarm:
         #: when True the USER types the email / confirmation code in the
         #: emulator and the flow just waits for them
         self.manual_input = manual_input
+        #: optional existing instance (name or index) cloned for every new
+        #: signup instance instead of creating a blank one — lets Facebook
+        #: come pre-installed
+        self.template = template
+        self._template_target: tuple[int, str] | None = None
 
         self._stop = threading.Event()
         self._create_lock = threading.Lock()   # ldconsole add/modify/remove
@@ -168,12 +174,75 @@ class SignupFarm:
             self._log(f"could not enable adb on leidian{index}: {exc}")
             return False
 
+    def _fix_window_shape(self, index: int) -> bool:
+        """Give a fresh instance a phone-shaped desktop window.
+
+        Blank ``add`` instances store no window geometry
+        (basicSettings.width/height/realWidth/realHeigh are all 0), so the
+        player window opens at LDPlayer's landscape-ish default even though
+        Android itself runs 720x1280 portrait. Writing an explicit geometry
+        here makes the window open tall like a phone.
+        """
+        vms = self._vms_root()
+        cfg_file = vms / "config" / f"leidian{index}.config" if vms else None
+        if not cfg_file or not cfg_file.is_file():
+            return False
+        try:
+            data = json.loads(cfg_file.read_text(encoding="utf-8"))
+            res = data.get("advancedSettings.resolution") or {}
+            w = int(res.get("width", 720))
+            h = int(res.get("height", 1280))
+            # desktop window scaled to fit a ~1080p screen (with margin)
+            scale = min(1.0, 1000.0 / max(h, 1))
+            win_w = max(1, int(w * scale))
+            win_h = max(1, int(h * scale))
+            data["basicSettings.width"] = w          # client area = Android res
+            data["basicSettings.height"] = h
+            data["basicSettings.realWidth"] = win_w + 20   # outer window incl.
+            data["basicSettings.realHeigh"] = win_h + 35   # borders/titlebar
+            tmp = cfg_file.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data, indent=4, ensure_ascii=False),
+                           encoding="utf-8")
+            tmp.replace(cfg_file)
+            return True
+        except (OSError, ValueError, TypeError) as exc:
+            self._log(f"could not set window shape on leidian{index}: {exc}")
+            return False
+
+    def _resolve_template(self) -> tuple[int, str]:
+        """``--template`` accepts an index or a name -> (index, name)."""
+        raw = str(self.template).strip()
+        inst = self.console.find(index=int(raw)) if raw.isdigit() else None
+        if inst is None:
+            inst = self.console.find(name=raw)
+        if inst is None:
+            raise RuntimeError(
+                f"template instance '{raw}' not found — check the LDPlayer "
+                "instance list")
+        return inst.index, inst.name
+
     def _create_instance(self, name: str) -> int:
-        """Create + randomise device settings. Returns the instance index."""
+        """Create (+randomise device settings). Returns the instance index.
+
+        With ``--template`` set, the new instance is a CLONE of that
+        instance (Facebook etc. come pre-installed) instead of a blank one.
+        """
         with self._create_lock:
             if self.console.find(name=name):
                 raise RuntimeError(f"instance '{name}' already exists")
-            res = self.console.add(name)
+            if self._template_target:
+                src_idx, src_name = self._template_target
+                try:
+                    running = self.console.is_running(index=src_idx)
+                except LdConsoleError:
+                    running = False
+                if running:
+                    raise RuntimeError(
+                        f"template '{src_name}' is running — close it "
+                        "before cloning")
+                res = self.console.copy(name, source_index=src_idx)
+            else:
+                res = self.console.add(name)
             inst = self.console.find(name=name)
             if not inst:
                 raise RuntimeError(
@@ -191,7 +260,11 @@ class SignupFarm:
                 raise RuntimeError(
                     f"could not enable adbDebug on '{name}' "
                     f"(index {inst.index}) — discarding it")
-            self._log(f"created '{name}' (index {inst.index}) — "
+            # open the player window tall like a phone, never landscape
+            self._fix_window_shape(inst.index)
+            mode = "cloned from template" if self._template_target else \
+                "created blank"
+            self._log(f"{mode} '{name}' (index {inst.index}) — "
                       f"random mobile: {profile.summary()}")
             return inst.index
 
@@ -274,6 +347,12 @@ class SignupFarm:
         Returns the number of leftovers removed.
         """
         keep = self._saved_names()
+        if self.template:
+            try:
+                tidx, tname = self._resolve_template()
+                keep.add(tname)
+            except RuntimeError:
+                pass
         removed = 0
         try:
             leftovers = [i for i in self.console.list_instances()
@@ -421,6 +500,12 @@ class SignupFarm:
     # ------------------------------------------------------------------ main
     def run(self) -> tuple[int, int]:
         self._preflight()
+        if self.template:
+            tidx, tname = self._resolve_template()
+            self._template_target = (tidx, tname)
+            self._log(f"template mode: every new instance will be cloned "
+                      f"from '{tname}' (index {tidx}) — make sure it has "
+                      "Facebook installed and NO accounts signed in")
         removed = self.cleanup_leftovers()
         if removed:
             self._log(f"cleaned {removed} leftover instance(s) from earlier "
