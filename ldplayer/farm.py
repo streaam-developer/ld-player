@@ -199,26 +199,42 @@ class SignupFarm:
                      email=email)
             outcome = flow.success or "blocked"
             if outcome == "success":
-                idx = flow.inst.info.index if flow.inst.info else index
-                self._save_record(name, idx, email)
-                self._log(f"SUCCESS on '{name}' ({email}) — keeping instance")
+                # lock in the verdict FIRST — nothing below may un-save it
                 saved = True
-                if self.quit_on_success:
-                    try:
-                        flow.inst.quit()
-                        self._log(f"closed '{name}' (kept on disk)")
-                    except Exception as exc:  # noqa: BLE001
-                        self._log(f"'{name}' close after success failed: {exc}")
             else:
                 self._log(f"FAILED on '{name}' ({email}) — {outcome}; "
                           "deleting instance")
         except Exception as exc:  # noqa: BLE001
             self._log(f"ERROR during signup on '{name}': {exc}")
             traceback.print_exc()
-        finally:
+        if saved:
+            info = getattr(flow.inst, "info", None)
+            idx = info.index if info else index
+            try:
+                self._save_record(name, idx, email)
+            except Exception as exc:  # noqa: BLE001
+                self._log(f"'{name}' could not be logged to "
+                          f"{SAVED_FILE.name}: {exc}")
+            self._log(f"SUCCESS on '{name}' ({email}) — keeping instance")
+            if self.quit_on_success:
+                try:
+                    flow.inst.quit()
+                    self._log(f"closed '{name}' (kept on disk)")
+                except Exception as exc:  # noqa: BLE001
+                    self._log(f"'{name}' close after success failed: {exc} "
+                          "— instance stays running")
+        try:
             if not saved:
                 self._discard_instance(name)
             self._release(name, saved)
+        except Exception as exc:  # noqa: BLE001
+            self._log(f"post-cycle handling of '{name}' failed: {exc}")
+            with self._state_lock:
+                self._active.pop(name, None)
+                if not saved:
+                    self.failures += 1
+                else:
+                    self.successes += 1
         return True
 
     def _worker(self, worker_id: int) -> None:
