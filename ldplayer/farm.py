@@ -17,7 +17,9 @@ safe to drive concurrently; the long signup runs themselves are parallel.
 
 from __future__ import annotations
 
+import json
 import random
+import shutil
 import threading
 import time
 import traceback
@@ -26,10 +28,12 @@ from datetime import datetime
 from pathlib import Path
 
 from .adb import Adb
+from .config import load_config
 from .console import LdConsole, LdConsoleError
 from .emails import claim_email
 from .device import apply_profile
 from .facebook import FacebookFlow
+from .repair import _is_admin
 
 ROOT = Path(__file__).resolve().parent.parent
 SAVED_FILE = ROOT / "saved_instances.txt"
@@ -93,6 +97,27 @@ class SignupFarm:
             return self.accounts > 0 and self.successes >= self.accounts
 
     # ------------------------------------------------------ instance helpers
+    def _vms_root(self) -> Path | None:
+        lc = load_config().get("ldconsole")
+        return Path(lc).parent / "vms" if lc else None
+
+    def _instance_files_ok(self, index: int) -> bool:
+        """A created instance must at least have its VirtualBox descriptor;
+        a half-written folder is what later crashes LDPlayer with
+        WriteDataDenied on startup."""
+        vms = self._vms_root()
+        if not vms:
+            return True
+        return (vms / f"leidian{index}" / "leidian.vbox").is_file()
+
+    def _force_remove_files(self, index: int) -> None:
+        """Delete a leftover vms folder ldconsole's remove may leave behind."""
+        vms = self._vms_root()
+        d = vms / f"leidian{index}" if vms else None
+        if d and d.is_dir():
+            shutil.rmtree(d, ignore_errors=True)
+            self._log(f"removed leftover files in {d}")
+
     def _new_instance_name(self) -> str:
         while True:
             name = (f"{INSTANCE_PREFIX}{datetime.now().strftime('%m%d%H%M%S')}"
@@ -111,6 +136,13 @@ class SignupFarm:
                 raise RuntimeError(
                     f"create failed: {res.text or res.stderr}")
             profile = apply_profile(self.console, name=name)
+            # verify the write actually landed — a partial instance would
+            # break the whole LDPlayer install ("Failed to load ... /
+            # WriteDataDenied") the next time it starts
+            if not self._instance_files_ok(inst.index):
+                raise RuntimeError(
+                    f"instance '{name}' was created incompletely "
+                    "(leidian.vbox missing) — discarding it")
             self._log(f"created '{name}' (index {inst.index}) — "
                       f"random mobile: {profile.summary()}")
             return inst.index
@@ -134,10 +166,16 @@ class SignupFarm:
                 if not self.console.find(name=name):
                     self._log(f"deleted instance '{name}' "
                               f"(attempt {attempt})")
+                    self._force_remove_files(inst.index)
                     return
                 self._log(f"remove of '{name}' did not take "
                           f"(attempt {attempt}: {res.text or res.stderr})")
                 time.sleep(3)
+            # last resort for stubborn half-created instances
+            self._force_remove_files(inst.index)
+            if not self.console.find(name=name):
+                self._log(f"deleted instance '{name}' (file-level)")
+                return
             self._log(f"WARNING: could not delete instance '{name}' — "
                       "remove it manually in LDPlayer")
         except Exception as exc:  # noqa: BLE001
@@ -164,6 +202,74 @@ class SignupFarm:
         except OSError as exc:
             self._log(f"could not write {SAVED_FILE}: {exc}")
 
+    def _saved_names(self) -> set[str]:
+        """Names of instances that completed a signup and must be kept."""
+        names: set[str] = set()
+        if SAVED_FILE.is_file():
+            try:
+                for line in SAVED_FILE.read_text(
+                        encoding="utf-8", errors="replace").splitlines():
+                    if "|" in line:
+                        names.add(line.split("|", 1)[0].strip())
+            except OSError:
+                pass
+        return names
+
+    # ------------------------------------------------------------- preflight
+    def cleanup_leftovers(self) -> int:
+        """Remove auto_* junk left by a previously killed/interrupted run.
+
+        Half-created instances are exactly what crashes LDPlayer at startup
+        with "Failed to load / WriteDataDenied". Instances recorded in
+        saved_instances.txt (successful signups) are never touched, and
+        neither are running instances (another live farm may own them).
+        Returns the number of leftovers removed.
+        """
+        keep = self._saved_names()
+        removed = 0
+        try:
+            leftovers = [i for i in self.console.list_instances()
+                         if i.name.startswith(INSTANCE_PREFIX)]
+        except Exception as exc:  # noqa: BLE001
+            self._log(f"could not list instances for leftover sweep: {exc}")
+            return 0
+        for inst in leftovers:
+            if inst.name in keep:
+                continue
+            try:
+                running = self.console.is_running(index=inst.index)
+            except LdConsoleError:
+                running = False
+            if running:
+                continue
+            self._log(f"leftover from an earlier run: '{inst.name}' "
+                      "(index "
+                      f"{inst.index}) — removing")
+            self._discard_instance(inst.name)
+            removed += 1
+        return removed
+
+    def _preflight(self) -> None:
+        """Warn about host conditions that cause WriteDataDenied."""
+        if not _is_admin():
+            self._log("NOT running as administrator — if you ever see "
+                      "'Failed to write data (WriteDataDenied)', run the "
+                      "terminal as admin and add C:\\LDPlayer to your "
+                      "antivirus exclusions")
+        vms = self._vms_root()
+        if vms:
+            drive = vms.anchor or "C:"
+            import shutil as _shutil
+            try:
+                free = _shutil.disk_usage(drive).free
+                gb = free / 2 ** 30
+                if gb < 15:
+                    self._log(f"WARNING: only {gb:.1f} GB free on {drive} — "
+                              "each instance needs ~3 GB; low disk causes "
+                              "write failures")
+            except OSError:
+                pass
+
     # ---------------------------------------------------------------- worker
     def _run_once(self, worker_id: int) -> bool:
         """One full create->signup->keep/delete cycle. False = fatal setup
@@ -173,6 +279,8 @@ class SignupFarm:
             index = self._create_instance(name)
         except Exception as exc:  # noqa: BLE001
             self._log(f"worker {worker_id}: creating instance failed: {exc}")
+            # never leave a half-created instance behind
+            self._discard_instance(name)
             time.sleep(15)
             return False
 
@@ -238,6 +346,14 @@ class SignupFarm:
         return True
 
     def _worker(self, worker_id: int) -> None:
+        # stagger the FIRST creations: three simultaneous `ldconsole add`
+        # calls racing on the same vms folder is what produced half-written
+        # instances (the WriteDataDenied corruption)
+        delay = (worker_id - 1) * 20 + random.uniform(0, 5)
+        if delay > 0 and not self._stop.is_set():
+            self._log(f"worker {worker_id} starting in {delay:.0f}s "
+                      "(staggered so VM creation never races)")
+            self._stop.wait(delay)
         while not self._stop.is_set() and not self._target_reached():
             progressed = self._run_once(worker_id)
             if self._stop.is_set() or self._target_reached():
@@ -250,6 +366,11 @@ class SignupFarm:
 
     # ------------------------------------------------------------------ main
     def run(self) -> tuple[int, int]:
+        self._preflight()
+        removed = self.cleanup_leftovers()
+        if removed:
+            self._log(f"cleaned {removed} leftover instance(s) from earlier "
+                      "runs")
         self._log(f"starting {self.workers} parallel workers"
                   + (f" — target {self.accounts} account(s)"
                      if self.accounts else " — Ctrl+C to stop"))
