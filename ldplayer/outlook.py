@@ -368,10 +368,21 @@ class OutlookFlow(AppSearchFlow):
         navigating away from the form."""
         deadline = time.time() + timeout
         hid_keyboard = False
+        scrolled = False
         scrolls = 0
         while time.time() < deadline:
             pos = self.auto.find_text("Next")
             if pos:
+                # a Next hugging the very bottom edge is often half-hidden
+                # behind the keyboard/nav-bar — scroll it into mid-screen
+                # first so the tap lands cleanly
+                _, screen_h = self.auto.resolution()
+                if not scrolled and pos[1] > screen_h * 0.82:
+                    self._hide_keyboard()
+                    self.auto.scroll_down()
+                    time.sleep(1.2)
+                    scrolled = True
+                    continue
                 self.step("next", f"clicking 'Next' at {pos}")
                 self.auto.tap(*pos, wait=2.0)
                 return pos
@@ -667,6 +678,11 @@ class OutlookFlow(AppSearchFlow):
                      + abs(f[1] - pos[1]))
         self.auto.fill_field(*target, year)
 
+        # close the keyboard and pull the below-fold Next button up into
+        # view before the flow clicks it
+        self._hide_keyboard()
+        self.auto.scroll_down()
+
         deadline = time.time() + 4
         while time.time() < deadline:
             if self._find_exact(year) or self._field_shows(year):
@@ -841,12 +857,14 @@ class OutlookFlow(AppSearchFlow):
 
     # ------------------------------------------------------------- saving
     def _save_credentials(self) -> None:
-        """Append ``outlook_address|password|recovery`` to raw.txt once."""
+        """Append ``outlook_address|password|recovery`` to outlook.txt
+        (and the shared raw.txt feed) once."""
         if self._creds_saved or not self.username or not self.password:
             return
         line = (f"{self.outlook_address}|{self.password}"
                 f"|{self.recovery_email or '-'}\n")
-        dest = Path(__file__).resolve().parent.parent / CREDENTIALS_FILE
+        root = Path(__file__).resolve().parent.parent
+        dest = root / "outlook.txt"
         try:
             with _FILE_LOCK:
                 with open(dest, "a", encoding="utf-8") as fh:
@@ -854,6 +872,14 @@ class OutlookFlow(AppSearchFlow):
             self._creds_saved = True
             self.step("save_creds",
                       f"saved {self.outlook_address}|*** to {dest}")
+        except OSError as exc:
+            self.step("save_warn",
+                      f"could not write outlook.txt: {exc}")
+        # keep the shared registry (used by emails.py seeding) in sync
+        try:
+            with _FILE_LOCK:
+                with open(root / CREDENTIALS_FILE, "a", encoding="utf-8") as fh:
+                    fh.write(line)
         except OSError as exc:
             self.step("save_warn", f"could not write credentials file: {exc}")
 
