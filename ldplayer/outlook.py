@@ -58,6 +58,10 @@ USE_WITHOUT_BUTTONS = ["Use without signing in", "Use without an account",
 GOT_IT_BUTTONS = ["Got it", "Got It", "GOT IT"]
 #: intermediate first-run pages ("sync?" etc.) advance via a More button
 MORE_BUTTONS = ["More"]
+#: strong wizard markers watched during every text wait — deliberately
+#: EXCLUDES "more" (too common on normal pages) to avoid false positives
+_WIZARD_WATCH = tuple(
+    m.lower() for m in [CHROME_WELCOME, *GOT_IT_BUTTONS])
 
 URL_BAR_IDS = ["com.android.chrome:id/url_bar",
                "com.android.chrome:id/search_box_text"]
@@ -315,11 +319,25 @@ class OutlookFlow(AppSearchFlow):
     def _wait_for_any_text(self, texts: list[str], timeout: float = 120,
                            dismiss_popups: bool = True
                            ) -> tuple[str, tuple[int, int]]:
-        """Poll until any of `texts` shows up. Returns (text, (x, y))."""
+        """Poll until any of `texts` shows up. Returns (text, (x, y)).
+
+        While waiting, Chrome's first-run wizard markers are watched too:
+        a wizard page that renders LATE (slow fresh instances) used to sit
+        invisibly over the page we were waiting for and stall the flow."""
         low = [t.lower() for t in texts]
+        last_wizard_pass = 0.0
 
         def find_any():
+            nonlocal last_wizard_pass
             joined = self.screen_text()
+            if any(m in joined for m in _WIZARD_WATCH) and \
+                    time.time() - last_wizard_pass > 20:
+                last_wizard_pass = time.time()
+                self.step("first_run_watch",
+                          "first-run wizard appeared mid-wait — "
+                          "dismissing it ...")
+                self.handle_first_run(45)
+                joined = self.screen_text()
             if dismiss_popups:
                 self._dismiss_popups()
             for t, l in zip(texts, low):
@@ -503,7 +521,7 @@ class OutlookFlow(AppSearchFlow):
                 self.auto.tap(*pos, wait=3.0)
         self.wait_foreground(open_timeout)
 
-    def handle_first_run(self, timeout: float = 45) -> bool:
+    def handle_first_run(self, timeout: float = 75) -> bool:
         """Dismiss Chrome's first-run wizard when present.
 
         "Welcome to Chrome" -> "Use without signing in" -> "More" ->
@@ -574,6 +592,10 @@ class OutlookFlow(AppSearchFlow):
 
         if dismissed:
             time.sleep(2.0)
+        else:
+            self.step("first_run",
+                      f"no first-run wizard detected "
+                      f"(scanned ~{timeout:.0f}s) — continuing")
         return dismissed
 
     def navigate(self, url: str = START_URL, load_timeout: float = 150,
