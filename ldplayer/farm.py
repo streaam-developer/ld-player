@@ -205,16 +205,16 @@ class SignupFarm:
                 return name
 
     def _enable_adb(self, index: int) -> bool:
-        """Turn on ADB debugging in the instance config before first launch.
+        """Turn on ``adbDebug`` in the instance config before first launch.
 
-        LDPlayer 9 kept a per-instance switch (``basicSettings.adbDebug``)
-        that freshly created instances could inherit as OFF — then adbd
-        never starts inside the guest, every adb port refuses connections,
-        and boot-wait hangs forever even though Android itself boots fine.
-        LDPlayer 14 removed the key entirely (adb is always available), so a
-        config without it counts as already enabled. The flag is only read
-        at VM start, so writing it here (instance stopped) takes effect on
-        the very next launch.
+        Freshly created instances inherit the LDPlayer GUI's global default,
+        which may have ADB debugging OFF (``basicSettings.adbDebug: 0``) —
+        then adbd never starts inside the guest, every adb port refuses
+        connections, and boot-wait hangs forever even though Android itself
+        boots fine. Verified on LDPlayer 14 (14.0.18.0): new instance
+        configs omit the key entirely, but it is still honoured when
+        present, so always write it here (instance stopped — the flag is
+        read at VM start and takes effect on the very next launch).
         """
         vms = self._vms_root()
         cfg_file = vms / "config" / f"leidian{index}.config" if vms else None
@@ -222,10 +222,6 @@ class SignupFarm:
             return False
         try:
             data = json.loads(cfg_file.read_text(encoding="utf-8"))
-            if "basicSettings.adbDebug" not in data:
-                return True   # LDPlayer 14+: no per-instance adb switch
-            if data.get("basicSettings.adbDebug") == 1:
-                return True
             data["basicSettings.adbDebug"] = 1
             tmp = cfg_file.with_suffix(".tmp")
             tmp.write_text(json.dumps(data, indent=4, ensure_ascii=False),
@@ -274,10 +270,9 @@ class SignupFarm:
                     continue
                 data[key] = value
                 copied += 1
-            # only force adbDebug where the key exists at all — LDPlayer 14
-            # dropped it (adb always on) and must not gain a legacy key
-            if "basicSettings.adbDebug" in data:
-                data["basicSettings.adbDebug"] = 1
+            # ADB debugging must be ON or the automation can never attach
+            # (LDPlayer 14 omits the key on new instances but still reads it)
+            data["basicSettings.adbDebug"] = 1
             # the instance name is its identity — never let a template
             # clobber it (an empty/wrong one makes every find-by-name fail)
             if instance_name:
