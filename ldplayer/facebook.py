@@ -209,23 +209,39 @@ class FacebookFlow:
                   f"(waiting for adb if needed)...")
         self.inst.install_apk_wait(apk, adb_timeout=timeout)
 
+    def _am_start(self) -> bool:
+        """``am start`` of the resolved launcher activity (monkey is not
+        shipped on LDPlayer 14's Android 14 image)."""
+        try:
+            out = self.auto.adb.shell(
+                self.inst.index,
+                ["cmd", "package", "resolve-activity", "--brief",
+                 self.package],
+                timeout=30, discover=True)
+            for line in reversed([ln.strip() for ln in out.splitlines()
+                                  if ln.strip()]):
+                pkg, sep, _act = line.partition("/")
+                if sep and "." in pkg \
+                        and not line.startswith(("priority", "match")):
+                    self.auto.adb.shell(self.inst.index,
+                                        ["am", "start", "-n", line],
+                                        timeout=60, discover=True)
+                    return True
+        except Exception:  # noqa: BLE001
+            pass
+        return False
+
     def open_facebook(self, timeout: float = 240) -> None:
         self.step("launch", f"opening {self.package} ...")
         try:
             self.inst.run_app(self.package)
         except Exception as exc:  # noqa: BLE001
             self.step("launch_warn",
-                      f"runapp failed ({exc}) — retrying via adb monkey...")
-            try:
-                self.auto.adb.shell(
-                    self.inst.index,
-                    ["monkey", "-p", self.package,
-                     "-c", "android.intent.category.LAUNCHER", "1"],
-                    timeout=60, discover=True)
-            except Exception as exc2:  # noqa: BLE001
+                      f"runapp failed ({exc}) — retrying via am start...")
+            if not self._am_start():
                 self.step("launch_warn",
-                          f"adb monkey fallback also failed ({exc2}) — "
-                          "continuing to wait for UI")
+                          "am start also failed — continuing to wait "
+                          "for UI")
 
         def focused():
             try:

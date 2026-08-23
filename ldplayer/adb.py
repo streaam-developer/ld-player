@@ -4,10 +4,17 @@ LDPlayer maps each instance to a local adb port. The conventional mapping is
 ``5555 + index*2``, but LDPlayer 9.5.31.0 has been observed registering the
 first instance as ``emulator-5554``, so we discover the live serial by
 probing candidate ports and confirming the device is LDPlayer.
+
+LDPlayer 14 (Android 14) keeps the ``emulator-<port>`` convention but its
+adb channel silently drops every few minutes even while the instance keeps
+running. Poking it through ldconsole (``ldconsole adb --index N``) makes the
+emulator re-register with the adb server, so failing commands are retried
+once behind that kick.
 """
 
 from __future__ import annotations
 
+import re
 import subprocess
 import time
 
@@ -18,14 +25,36 @@ class AdbError(RuntimeError):
     pass
 
 
+#: error fragments meaning the per-instance adb transport went away
+_TRANSPORT_LOST_RE = re.compile(
+    r"device ('[^']*' )?(?:not found|offline)"
+    r"|device still connecting"
+    r"|error: closed"
+    r"|closed connection"
+    r"|transport.*closed",
+    re.IGNORECASE,
+)
+
+
 class Adb:
     def __init__(self, adb: str | Path, host: str = "127.0.0.1",
-                 base_port: int = 5555, timeout: int = 120):
+                 base_port: int = 5555, timeout: int = 120,
+                 ldconsole: str | Path | None = None):
         self.adb = str(adb)
         self.host = host
         self.base_port = base_port
         self.timeout = timeout
+        self.ldconsole = str(ldconsole) if ldconsole else self._default_console()
         self._ports: dict[int, str | None] = {}
+
+    @staticmethod
+    def _default_console() -> str | None:
+        """Saved ldconsole path — used to kick dropped transports."""
+        try:
+            from .config import load_config
+            return load_config().get("ldconsole")
+        except Exception:  # noqa: BLE001
+            return None
 
     # --------------------------------------------------------------- discovery
     def port_for(self, index: int) -> int:
@@ -171,6 +200,39 @@ class Adb:
             f"adb device for LDPlayer index {index} not available within "
             f"{timeout}s (last: {last_err})")
 
+    # -------------------------------------------------------------- recovery
+    @staticmethod
+    def _transport_lost(exc: Exception) -> bool:
+        return bool(_TRANSPORT_LOST_RE.search(str(exc)))
+
+    def _recover(self, index: int) -> None:
+        """Best effort: make the emulator re-register with the adb server.
+
+        Order matters and every step is allowed to fail silently — any one
+        of them is usually enough on LDPlayer 14:
+          1. ``adb reconnect offline`` revives zombie transports
+          2. an ldconsole adb poke re-registers the emulator channel
+          3. a fresh ``devices`` listing triggers the server-side rescan
+        """
+        self._ports[index] = None
+        try:
+            self._run(["reconnect", "offline"], timeout=10)
+        except AdbError:
+            pass
+        if self.ldconsole:
+            try:
+                subprocess.run(
+                    [self.ldconsole, "adb", "--index", str(index),
+                     "--command", "get-state"],
+                    capture_output=True, timeout=30, check=False,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            self._run(["devices"], timeout=15)
+        except AdbError:
+            pass
+
     # ------------------------------------------------------------------ core
     def _run(self, args: list[str], timeout: int | None = None) -> str:
         cmd = [self.adb] + args
@@ -197,21 +259,41 @@ class Adb:
 
     def shell(self, index: int, cmd: list[str], timeout: int | None = None,
               discover: bool = False) -> str:
-        return self._run(
-            ["-s", self._serial(index, discover), "shell"] + cmd,
-            timeout,
-        )
+        try:
+            return self._run(
+                ["-s", self._serial(index, discover), "shell"] + cmd,
+                timeout,
+            )
+        except AdbError as exc:
+            if not self._transport_lost(exc):
+                raise
+            self._recover(index)
+            return self._run(
+                ["-s", self._serial(index, True), "shell"] + cmd,
+                timeout,
+            )
 
     def exec_out(self, index: int, cmd: list[str],
                  timeout: int | None = None) -> bytes:
-        proc = subprocess.run(
-            [self.adb, "-s", self._serial(index), "exec-out"] + cmd,
-            capture_output=True, timeout=timeout or self.timeout, check=False,
-        )
-        if proc.returncode != 0:
-            raise AdbError(f"adb exec-out failed: "
-                           f"{proc.stderr.decode(errors='replace')}")
-        return proc.stdout
+        def _once(serial: str) -> bytes:
+            proc = subprocess.run(
+                [self.adb, "-s", serial, "exec-out"] + cmd,
+                capture_output=True, timeout=timeout or self.timeout,
+                check=False,
+            )
+            if proc.returncode != 0:
+                raise AdbError(f"adb exec-out failed: "
+                               f"{proc.stderr.decode(errors='replace')}")
+            return proc.stdout
+
+        try:
+            return _once(self._serial(index))
+        except (AdbError, subprocess.TimeoutExpired) as exc:
+            if not (isinstance(exc, subprocess.TimeoutExpired)
+                    or self._transport_lost(exc)):
+                raise
+            self._recover(index)
+            return _once(self._serial(index))
 
     def push(self, index: int, local: str | Path, remote: str,
              discover: bool = False, timeout: int | None = None) -> str:

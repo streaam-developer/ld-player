@@ -227,32 +227,95 @@ class AppSearchFlow:
             f"'{self.label}' was not found in the launcher within {timeout}s")
 
     # ------------------------------------------------------------ launching
-    def wait_foreground(self, timeout: float = 90) -> None:
+    def wait_foreground(self, timeout: float = 90,
+                        relaunch_after: float = 20) -> None:
+        """Poll until the package is focused — re-launching while we wait.
+
+        A single icon tap can miss (the launcher re-flips pages between the
+        UI dump and the tap, and LDPlayer 14's launcher does this a lot),
+        so sitting still until the timeout just wastes the window. Instead
+        the app is launched again every ``relaunch_after`` seconds until it
+        reaches the foreground or the deadline passes.
+        """
         frag = self.package.lower()
+        start = time.time()
+        last_launch = 0.0
 
-        def focused():
-            act = self.auto.focused_activity()
-            return bool(act and frag in act.lower())
+        while time.time() < start + timeout:
+            act = ""
+            try:
+                act = self.auto.focused_activity() or ""
+            except Exception:  # noqa: BLE001
+                pass
+            if frag in act.lower():
+                self.step("foreground", f"{self.package} is in the foreground")
+                return
 
-        Waiter(timeout, poll=3.0,
-               label=f"waiting for {self.package} to reach the "
-                     f"foreground").until(focused,
-                                          f"{self.package} in the foreground")
-        self.step("foreground", f"{self.package} is in the foreground")
+            if time.time() - last_launch >= relaunch_after:
+                last_launch = time.time()
+                self.step("open",
+                          f"{self.package} not focused yet — "
+                          f"(re)launching it ...")
+                try:
+                    self.direct_launch()
+                except Exception as exc:  # noqa: BLE001
+                    self.step("direct_warn",
+                              f"relaunch failed ({exc}) — still waiting ...")
+            time.sleep(3.0)
 
-    def direct_launch(self) -> None:
-        self.step("direct",
-                  f"UI search failed — launching {self.package} directly...")
+        raise AutomationError(
+            f"timed out waiting for {self.package} to reach the foreground "
+            f"({timeout:.0f}s)")
+
+    def resolve_launcher_activity(self) -> str | None:
+        """``pkg/activity`` of the package's launcher entry, if resolvable."""
+        try:
+            out = self.auto.adb.shell(
+                self.inst.index,
+                ["cmd", "package", "resolve-activity", "--brief",
+                 self.package],
+                timeout=30, discover=True)
+        except Exception:  # noqa: BLE001
+            return None
+        for line in reversed([ln.strip() for ln in out.splitlines()
+                              if ln.strip()]):
+            pkg, sep, act = line.partition("/")
+            if sep and "." in pkg and not line.startswith(("priority", "match")):
+                return line
+        return None
+
+    def direct_launch(self) -> bool:
+        """Launch the package without any UI interaction.
+
+        Order: ldconsole runapp -> am start of the resolved launcher
+        activity -> adb monkey. (LDPlayer 14's Android 14 image ships
+        WITHOUT /system/bin/monkey, so that path only helps older images.)
+        """
         try:
             self.inst.run_app(self.package)
-        except Exception as exc:  # noqa: BLE001
-            self.step("direct_warn",
-                      f"runapp failed ({exc}) — trying adb monkey...")
+            return True
+        except Exception:  # noqa: BLE001
+            pass
+
+        activity = self.resolve_launcher_activity()
+        if activity:
+            try:
+                self.auto.adb.shell(self.inst.index,
+                                    ["am", "start", "-n", activity],
+                                    timeout=60, discover=True)
+                return True
+            except Exception:  # noqa: BLE001
+                pass
+
+        try:
             self.auto.adb.shell(
                 self.inst.index,
                 ["monkey", "-p", self.package,
                  "-c", "android.intent.category.LAUNCHER", "1"],
                 timeout=60, discover=True)
+            return True
+        except Exception:  # noqa: BLE001
+            return False
 
     # --------------------------------------------------------------- runner
     def run(self, boot_timeout: float = 600, search_timeout: float = 180,
