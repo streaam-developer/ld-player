@@ -1,22 +1,23 @@
-# ldcli — LDPlayer 9 automation CLI
+# ldcli — LDPlayer automation CLI
 
 Open emulator instances, install APKs, spin up **new** instances cloned from an
 old one, and take **full backups** — all from the command line. Python 3.9+
 standard-library only, no pip installs.
 
-Verified against **LDPlayer v9.5.31.0** (LDPlayer 9).
+Verified against **LDPlayer 14** and **LDPlayer v9.5.31.0** (LDPlayer 9).
 
 ## Setup
 
 ```bat
-python ldcli.py init        :: auto-detect LDPlayer 9 + adb, write config
+python ldcli.py init        :: auto-detect LDPlayer + adb, write config
 python ldcli.py doctor      :: verify the toolchain
 python ldcli.py init --default-instance <name>   :: set the default instance
 ```
 
 Auto-detection checks the registry, `LDPLAYER_HOME`, and common folders
-(`C:\LDPlayer\LDPlayer9`, `D:\LDPlayer\LDPlayer9`, ...). If it can't find the
-install, set `LDPLAYER_HOME` (or `ANDROID_HOME` for adb) and run `init` again.
+(`C:\LDPlayer\LDPlayer14`, `D:\LDPlayer\LDPlayer14`, ...; legacy LDPlayer 9
+installs are still found as a fallback). If it can't find the install, set
+`LDPLAYER_HOME` (or `ANDROID_HOME` for adb) and run `init` again.
 Config is saved to `%APPDATA%\ldplayer-cli\config.json`.
 
 Optionally add this folder to your `PATH` — then just run `ldcli ...` via

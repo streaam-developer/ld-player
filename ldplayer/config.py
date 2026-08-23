@@ -13,16 +13,19 @@ from pathlib import Path
 CONFIG_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "ldplayer-cli"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 
+#: LDPlayer 14 first, legacy LDPlayer 9 installs kept as fallback
 LDPLAYER_COMMON_DIRS = [
-    
-    "C:\\leidian\\LDPlayer9",
+
+    "C:\\leidian\\LDPlayer14",
+    "C:\\LDPlayer\\LDPlayer14",
+    "D:\\LDPlayer\\LDPlayer14",
+    "E:\\LDPlayer\\LDPlayer14",
+    "C:\\Program Files\\LDPlayer\\LDPlayer14",
+    "C:\\Program Files (x86)\\LDPlayer\\LDPlayer14",
+    "D:\\Program Files\\LDPlayer\\LDPlayer14",
+    "C:\\dnplayer",
     "C:\\LDPlayer\\LDPlayer9",
     "D:\\LDPlayer\\LDPlayer9",
-    "E:\\LDPlayer\\LDPlayer9",
-    "C:\\Program Files\\LDPlayer\\LDPlayer9",
-    "C:\\Program Files (x86)\\LDPlayer\\LDPlayer9",
-    "D:\\Program Files\\LDPlayer\\LDPlayer9",
-    "C:\\dnplayer",
 ]
 
 ADB_COMMON_DIRS = [
@@ -88,8 +91,8 @@ def _find_ldconsole_by_registry() -> Path | None:
 
 
 def find_ldconsole() -> Path | None:
-    """Locate ldconsole.exe for LDPlayer 9."""
-    env = os.environ.get("LDPLAYER_HOME") or os.environ.get("LDPLAYER9_HOME")
+    """Locate ldconsole.exe (LDPlayer 14, falling back to legacy installs)."""
+    env = os.environ.get("LDPLAYER_HOME") or os.environ.get("LDPlayer14_HOME")
     if env:
         cand = Path(env) / "ldconsole.exe"
         if cand.is_file():

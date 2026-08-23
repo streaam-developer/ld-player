@@ -137,12 +137,15 @@ def _vms_root() -> Path | None:
 
 
 def _enable_adb(index: int) -> bool:
-    """Force ``basicSettings.adbDebug = 1`` before first launch.
+    """Make sure ADB debugging is on before first launch.
 
-    Fresh instances inherit the GUI's global default which may have ADB off —
-    then adb never attaches and boot-wait hangs forever even though Android
-    boots fine. The flag is only read at VM start, so writing it while the
-    instance is stopped takes effect on the very next launch.
+    LDPlayer 9 kept a per-instance switch (``basicSettings.adbDebug``) that
+    fresh instances could inherit as OFF — then adb never attaches and
+    boot-wait hangs forever even though Android boots fine. LDPlayer 14
+    removed the key entirely (adb is always available), so a config without
+    it is treated as "already enabled". The flag is only read at VM start,
+    so writing it while the instance is stopped takes effect on the next
+    launch.
     """
     vms = _vms_root()
     cfg_file = vms / "config" / f"leidian{index}.config" if vms else None
@@ -150,6 +153,8 @@ def _enable_adb(index: int) -> bool:
         return False
     try:
         data = json.loads(cfg_file.read_text(encoding="utf-8"))
+        if "basicSettings.adbDebug" not in data:
+            return True   # LDPlayer 14+: no per-instance adb switch anymore
         data["basicSettings.adbDebug"] = 1
         tmp = cfg_file.with_suffix(".tmp")
         tmp.write_text(json.dumps(data, indent=4, ensure_ascii=False),

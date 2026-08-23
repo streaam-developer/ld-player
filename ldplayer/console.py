@@ -1,12 +1,9 @@
-"""Thin, well-typed wrapper around LDPlayer 9's ldconsole.exe.
+"""Thin, well-typed wrapper around LDPlayer's ldconsole.exe.
 
-Verified against LDPlayer v9.5.31.0. This version's command set differs from
-older docs:
-  * instance list  -> ``list2`` (CSV: index,name,pid,...)
-  * full backup    -> ``backup`` / ``restore`` with *.ldbk files
-  * per-app backup -> ``backupapp`` / ``restoreapp``
-  * install        -> ``installapp``; force-stop -> ``killapp``
-  * no ``export``/``import``/``screencap`` (screencap goes via adb)
+Verified against LDPlayer 9 v9.5.31.0 and LDPlayer 14. The command set is
+compatible across both (``list2``, ``backup``, ``installapp``, ...); the
+main difference is that LDPlayer 14 dropped the per-instance
+``basicSettings.adbDebug`` switch.
 """
 
 from __future__ import annotations
