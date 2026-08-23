@@ -439,7 +439,10 @@ class Adb:
             return False
 
     def focused_activity(self, index: int, discover: bool = True) -> str | None:
-        out = self.shell(index, ["dumpsys", "window", "windows"], timeout=30,
+        # NOTE: LDPlayer 14 / Android 14 omits mCurrentFocus/mFocusedApp from
+        # `dumpsys window windows`; the full `dumpsys window` dump carries
+        # them on both v9 and v14.
+        out = self.shell(index, ["dumpsys", "window"], timeout=30,
                          discover=discover)
         for line in out.splitlines():
             line = line.strip()

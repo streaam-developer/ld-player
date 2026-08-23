@@ -481,16 +481,26 @@ class OutlookFlow(AppSearchFlow):
     # -------------------------------------------------------- chrome steps
     def open_chrome(self, search_timeout: float = 180,
                     open_timeout: float = 90) -> None:
-        """Locate Chrome in the launcher and bring it to the foreground."""
+        """Bring Chrome to the foreground — DIRECT launch first.
+
+        Launcher icon hunting costs several ui-dump scan cycles; an
+        ``am start`` of the resolved activity is deterministic and instant.
+        The slow icon path is only a fallback when direct launch fails,
+        and ``wait_foreground`` keeps re-launching every ~15-20s anyway.
+        """
         self.ensure_app_installed()
         self.go_home()
-        try:
-            pos = self.locate_icon(search_timeout)
-        except AppSearchError:
-            self.direct_launch()
-        else:
-            self.step("open", f"tapping '{self.label}' at {pos}")
-            self.auto.tap(*pos, wait=3.0)
+        self.step("open", "fast-launching Chrome (am start)...")
+        if not self.direct_launch():
+            try:
+                pos = self.locate_icon(search_timeout)
+            except AppSearchError:
+                self.step("open_warn",
+                          "direct launch + icon hunt failed — "
+                          "waiting for UI anyway")
+            else:
+                self.step("open", f"tapping '{self.label}' at {pos}")
+                self.auto.tap(*pos, wait=3.0)
         self.wait_foreground(open_timeout)
 
     def handle_first_run(self, timeout: float = 45) -> bool:
@@ -500,10 +510,15 @@ class OutlookFlow(AppSearchFlow):
         "Got it". Returns True when anything was dismissed.
         """
         deadline = time.time() + timeout
+        # absolute ceiling so a broken wizard can't loop forever
+        hard_deadline = time.time() + 4 * timeout
         dismissed = False
         welcome_seen_at: float | None = None
 
-        while time.time() < deadline:
+        # every successful tap RESETS the per-page budget: on fresh
+        # instances a wizard page can take >60s to render, and a fixed
+        # window used to expire mid-wizard (leaving 'Got it' unclicked)
+        while time.time() < min(deadline, hard_deadline):
             joined = self.screen_text()
 
             if CHROME_WELCOME in joined:
@@ -515,6 +530,7 @@ class OutlookFlow(AppSearchFlow):
                     self.step("first_run", f"'{target}' at {pos} — tapping...")
                     self.auto.tap(*pos, wait=3.0)
                     dismissed = True
+                    deadline = time.time() + timeout
                 time.sleep(1.5)
                 continue
 
@@ -527,6 +543,7 @@ class OutlookFlow(AppSearchFlow):
                               f"'{got_it}' page — tapping at {pos}...")
                     self.auto.tap(*pos, wait=3.0)
                     dismissed = True
+                    deadline = time.time() + timeout
                     break
                 time.sleep(1.5)
                 continue
@@ -541,6 +558,7 @@ class OutlookFlow(AppSearchFlow):
                               f"'{more}' page — advancing at {pos}...")
                     self.auto.tap(*pos, wait=2.5)
                     dismissed = True
+                    deadline = time.time() + timeout
                 time.sleep(1.5)
                 continue
 

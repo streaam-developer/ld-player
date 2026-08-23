@@ -39,7 +39,7 @@ import time
 from pathlib import Path
 
 from .adb import Adb
-from .automation import Automator, AutomationError, Waiter
+from .automation import Automator, AutomationError, StepLogger, Waiter
 from .console import LdConsole
 from .email_otp import fetch_otp, OtpTimeout
 from .instance import Instance
@@ -156,7 +156,7 @@ def find_facebook_apk(extra: Path | None = None) -> Path:
     return max(apks, key=lambda p: p.stat().st_mtime)
 
 
-class FacebookFlow:
+class FacebookFlow(StepLogger):
     def __init__(self, console: LdConsole, adb: Adb, index: int | None = None,
                  name: str | None = None, package: str = "com.facebook.katana",
                  cf_worker_url: str = "", cf_worker_api_key: str = "",
@@ -165,7 +165,7 @@ class FacebookFlow:
         self.inst.resolve()
         self.package = package
         self.auto = Automator(console, adb, self.inst)
-        self.report: dict = {}
+        self.init_steps()
         #: "success" | "blocked" | "" (error / never finished) — set by run()
         self.success: str = ""
         self._email: str = ""
@@ -182,8 +182,7 @@ class FacebookFlow:
 
     # ---------------------------------------------------------------- steps
     def step(self, tag: str, msg: str) -> None:
-        print(f"[{self.inst.name}] {msg}", flush=True)
-        self.report[tag] = {"time": time.time(), "msg": msg}
+        self.log_step(self.inst.name, tag, msg)
 
     def open_instance_and_launcher(self, timeout: float = 600) -> None:
         self.step("instance", f"checking {self.inst.name} status...")
@@ -208,6 +207,11 @@ class FacebookFlow:
                   f"{self.package} not installed — installing {apk.name} "
                   f"(waiting for adb if needed)...")
         self.inst.install_apk_wait(apk, adb_timeout=timeout)
+        # give the package manager / media scanner a moment before the
+        # first launch attempt — opening too early silently no-ops
+        self.step("install",
+                  "installed — waiting 10s for the package to settle ...")
+        time.sleep(10)
 
     def _am_start(self) -> bool:
         """``am start`` of the resolved launcher activity (monkey is not
@@ -233,29 +237,40 @@ class FacebookFlow:
 
     def open_facebook(self, timeout: float = 240) -> None:
         self.step("launch", f"opening {self.package} ...")
-        try:
-            self.inst.run_app(self.package)
-        except Exception as exc:  # noqa: BLE001
-            self.step("launch_warn",
-                      f"runapp failed ({exc}) — retrying via am start...")
-            if not self._am_start():
-                self.step("launch_warn",
-                          "am start also failed — continuing to wait "
-                          "for UI")
 
-        def focused():
+        def focused() -> bool:
             try:
-                return self.auto.focused_activity()
-            except Exception:
-                return None
+                act = self.auto.focused_activity() or ""
+            except Exception:  # noqa: BLE001
+                return False
+            return "facebook" in act.lower()
 
-        try:
-            Waiter(timeout, poll=3.0,
-                   label=f"waiting for {self.package} to open").until(
-                lambda: bool(focused() and "facebook" in focused()),
-                "facebook app in the foreground")
+        # launch, verify, and RE-LAUNCH every ~20s until it really is in
+        # the foreground — a single runapp/am start can silently no-op on
+        # LDPlayer 14 (freshly installed package, busy package manager)
+        start = time.time()
+        last_launch = 0.0
+        confirmed = False
+        while time.time() - start < timeout:
+            if focused():
+                confirmed = True
+                break
+            if time.time() - last_launch >= 20.0:
+                last_launch = time.time()
+                try:
+                    self.inst.run_app(self.package)
+                except Exception:  # noqa: BLE001
+                    pass
+                time.sleep(4.0)
+                if not focused() and not self._am_start():
+                    self.step("launch_warn",
+                              "runapp + am start both failed — still "
+                              "waiting ...")
+            time.sleep(3.0)
+
+        if confirmed:
             self.step("launch_ok", "facebook is in the foreground")
-        except AutomationError:
+        else:
             self.step("launch_warn",
                       "could not confirm facebook foreground (adb flaky) — "
                       "continuing to the 'Create new account' wait")

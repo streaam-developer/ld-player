@@ -47,10 +47,14 @@ CHROME_PACKAGE = "com.android.chrome"
 FB_PACKAGE = "com.facebook.katana"
 
 
-def _keep_alive(adb: Adb, index: int) -> None:
+def _keep_alive(adb: Adb, index: int, quiet: bool = False) -> None:
     """Best-effort: pin Chrome + Facebook into Android's 'active' standby
     bucket so the memory manager stops killing them while they sit in the
-    background (Chrome used to get killed mid-signup)."""
+    background (Chrome used to get killed mid-signup).
+
+    Silently skips when adb is not attached yet (instance still booting)."""
+    if not adb.connect(index):
+        return
     for pkg in (CHROME_PACKAGE, FB_PACKAGE):
         try:
             adb.shell(index, ["am", "set-standby-bucket", pkg, "active"],
@@ -58,8 +62,9 @@ def _keep_alive(adb: Adb, index: int) -> None:
             print(f"[{index}] {pkg} pinned to the active bucket",
                   flush=True)
         except Exception as exc:  # noqa: BLE001
-            print(f"[{index}] could not pin {pkg} ({exc}) — continuing",
-                  flush=True)
+            if not quiet:
+                print(f"[{index}] could not pin {pkg} ({exc}) — continuing",
+                      flush=True)
 
 
 def _wait_foreground(flow, package: str, timeout: float = 20) -> bool:
@@ -152,6 +157,7 @@ def main() -> int:
 
     try:
         # ================================================== PHASE 1: outlook
+        t_start = time.time()
         index = args.index
         name = args.name
         if index is None and name is None:
@@ -163,26 +169,30 @@ def main() -> int:
                   f"(4 CPU / 4 GB), starting OUTLOOK signup ...", flush=True)
 
         index = inst.index if index is None else index
-        _keep_alive(adb, index)
 
         oflow = OutlookFlow(console, adb, index=index, name=name,
                             cf_worker_url=cfg.get("cf_worker_url", ""),
                             cf_worker_api_key=cfg.get("cf_worker_api_key", ""))
+        t_phase1 = time.time()
         oflow.run(boot_timeout=args.boot_timeout,
                   username=None, password=None,
                   first_name=first, last_name=last,
                   recovery_email=args.recovery_email,
                   min_age_years=args.min_age, max_age_years=args.max_age,
                   flow_timeout=args.flow_timeout)
+        phase1_secs = time.time() - t_phase1
 
         if not oflow.success or not oflow.outlook_address:
             raise RuntimeError("outlook phase did not complete — aborting")
 
-        print(f"\n[{oflow.inst.name}] OUTLOOK READY — "
-              f"{oflow.outlook_address} (saved to outlook.txt)\n",
+        print(f"\n[{oflow.inst.name}] OUTLOOK READY in {phase1_secs / 60:.1f} min"
+              f" — {oflow.outlook_address} (saved to outlook.txt)")
+        print(f"[{oflow.inst.name}] {oflow.summary(oflow.inst.name)}\n",
               flush=True)
 
         # ================================================ PHASE 2: facebook
+        _keep_alive(adb, index)          # pin Chrome now that it's running
+        t_phase2 = time.time()
         print(f"[{oflow.inst.name}] back to the launcher ...", flush=True)
         oflow.auto.home()
         time.sleep(2)
@@ -215,12 +225,17 @@ def main() -> int:
                   flow_timeout=args.flow_timeout)
 
         if fflow.success == "success":
+            total_min = (time.time() - t_start) / 60
             print(f"\n[{oflow.inst.name}] " + "=" * 60, flush=True)
-            print(f"[{oflow.inst.name}] PIPELINE COMPLETE", flush=True)
+            print(f"[{oflow.inst.name}] PIPELINE COMPLETE in {total_min:.1f} min"
+                  f"  (outlook {phase1_secs / 60:.1f} min | facebook "
+                  f"{(time.time() - t_phase2) / 60:.1f} min)", flush=True)
             print(f"[{oflow.inst.name}]   outlook  : {oflow.outlook_address}"
                   f"  -> outlook.txt", flush=True)
             print(f"[{oflow.inst.name}]   facebook : {fflow._email}"
                   f"  -> facebook.txt", flush=True)
+            print(f"[{oflow.inst.name}]   fb steps : "
+                  f"{fflow.summary(oflow.inst.name)}", flush=True)
             print(f"[{oflow.inst.name}] " + "=" * 60 + "\n", flush=True)
         else:
             print(f"\n[{oflow.inst.name}] facebook phase finished with "

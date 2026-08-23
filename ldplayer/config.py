@@ -155,12 +155,15 @@ def _defaults() -> dict:
 def load_config() -> dict:
     if CONFIG_FILE.is_file():
         try:
-            stored = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+            # utf-8-sig: tolerate a BOM (e.g. from PowerShell edits) instead
+            # of silently falling back to defaults and losing API keys
+            stored = json.loads(CONFIG_FILE.read_text(encoding="utf-8-sig"))
             merged = _defaults()
             merged.update(stored)
             return merged
-        except (json.JSONDecodeError, OSError):
-            pass
+        except (json.JSONDecodeError, OSError) as exc:
+            print(f"[ldplayer-cli] WARNING: could not parse {CONFIG_FILE} "
+                  f"({exc}) — using auto-detected defaults", flush=True)
     return _defaults()
 
 

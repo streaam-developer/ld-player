@@ -74,6 +74,52 @@ class Waiter:
                               f"({self.timeout}s)")
 
 
+class StepLogger:
+    """Mixin for flows: ``step()`` printing with elapsed-time stamps.
+
+    Every line carries the time spent in the PREVIOUS step and the TOTAL
+    elapsed since flow start — e.g.
+    ``[inst] (+12.3s | total 67.9s) opening Chrome ...``
+    so slow steps are immediately visible in the console.
+    """
+
+    def init_steps(self) -> None:
+        self.report: dict = {}
+        self._t0: float | None = None
+        self._prev_step_at: float | None = None
+
+    def log_step(self, name: str, tag: str, msg: str,
+                 quiet: bool = False) -> None:
+        now = time.time()
+        if self._t0 is None:
+            self._t0 = now
+            stamp = "[  start      ]"
+        elif self._prev_step_at is not None:
+            delta = now - self._prev_step_at
+            total = now - self._t0
+            stamp = f"[+{delta:6.1f}s | T{total:6.1f}s]"
+        else:
+            stamp = "[" + " " * 13 + "]"
+        self._prev_step_at = now
+        if not quiet:
+            print(f"{name}: {stamp} {msg}", flush=True)
+        self.report[tag] = {"time": now, "elapsed": (
+            now - self._t0) if self._t0 else 0.0, "msg": msg}
+
+    def summary(self, name: str) -> str:
+        """One-line 'where did the time go' report of all logged steps."""
+        if not self.report:
+            return ""
+        parts = []
+        prev_t = None
+        for tag, info in self.report.items():
+            t = info["elapsed"]
+            d = t - prev_t if prev_t is not None else t
+            parts.append(f"{tag} {d:.0f}s")
+            prev_t = t
+        return f"{name}: step breakdown -> " + ", ".join(parts)
+
+
 class Automator:
     """Coordinate-space actions against a specific instance."""
 
@@ -425,16 +471,19 @@ class Automator:
                 return False
 
         def booted_or_ready():
-            # Fast check first — if adb responds, device is alive
-            if device_responsive():
-                return True
             if launcher_focused():
                 return True
             if self.adb.is_boot_completed(self.instance.index,
                                           discover=True):
                 return True
+            # plain responsiveness alone proves nothing during the first
+            # seconds: adbd answers long before PackageManager works,
+            # which made downstream 'pm' checks see an empty app list
+            if time.time() - phase_t0 > 30 and device_responsive():
+                return True
             return False
 
+        phase_t0 = time.time()
         # Phase 1: wait for boot or launcher (uses most of the timeout)
         boot_timeout = timeout * 0.7
         try:

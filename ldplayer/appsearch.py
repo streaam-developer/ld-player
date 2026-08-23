@@ -25,7 +25,7 @@ import re
 import time
 
 from .adb import Adb
-from .automation import Automator, AutomationError, Waiter
+from .automation import (Automator, AutomationError, StepLogger, Waiter)
 from .console import LdConsole
 from .instance import Instance
 
@@ -50,7 +50,7 @@ class AppSearchError(RuntimeError):
     pass
 
 
-class AppSearchFlow:
+class AppSearchFlow(StepLogger):
     def __init__(self, console: LdConsole, adb: Adb, index: int | None = None,
                  name: str | None = None, label: str = DEFAULT_LABEL,
                  package: str = DEFAULT_PACKAGE):
@@ -59,14 +59,13 @@ class AppSearchFlow:
         self.label = label
         self.package = package
         self.auto = Automator(console, adb, self.inst)
-        self.report: dict = {}
+        self.init_steps()
         #: folder labels already visited during this run
         self._folders_seen: set[str] = set()
 
     # ---------------------------------------------------------------- steps
     def step(self, tag: str, msg: str) -> None:
-        print(f"[{self.inst.name}] {msg}", flush=True)
-        self.report[tag] = {"time": time.time(), "msg": msg}
+        self.log_step(self.inst.name, tag, msg)
 
     def open_instance_and_home(self, timeout: float = 600) -> None:
         self.step("instance", f"checking {self.inst.name} status...")
@@ -80,14 +79,42 @@ class AppSearchFlow:
         self.auto.wait_for_home(timeout)
         self.go_home()
 
-    def ensure_app_installed(self) -> None:
-        if self.auto.package_installed(self.package):
-            self.step("install", f"{self.package} is installed")
-            return
-        raise AppSearchError(
-            f"{self.package} is not installed on {self.inst.name} — install "
-            f"it first (e.g. `python ldcli.py setup --index {self.inst.index}`)"
-            f" or point --package at another installed app")
+    def ensure_app_installed(self, timeout: float = 90) -> None:
+        """Confirm `package` is present — tolerating early-boot races.
+
+        On a freshly started instance PackageManager can answer before
+        the system finishes booting with an empty/partial package list,
+        which used to raise "not installed" spuriously. Poll until boot
+        completes (or the deadline passes) instead of trusting one check.
+        """
+        deadline = time.time() + timeout
+        confirm_pass = True
+        while True:
+            try:
+                if self.auto.package_installed(self.package):
+                    self.step("install", f"{self.package} is installed")
+                    return
+            except Exception:  # noqa: BLE001
+                pass
+            booted = False
+            try:
+                booted = self.auto.adb.is_boot_completed(self.inst.index,
+                                                         discover=True)
+            except Exception:  # noqa: BLE001
+                pass
+            if booted and confirm_pass:
+                # even with boot reported complete, give the package
+                # list one extra pass to settle before declaring failure
+                confirm_pass = False
+                time.sleep(4.0)
+                continue
+            if time.time() >= deadline:
+                raise AppSearchError(
+                    f"{self.package} is not installed on {self.inst.name} —"
+                    f" install it first (e.g. `python ldcli.py setup "
+                    f"--index {self.inst.index}`) or point --package at "
+                    f"another installed app")
+            time.sleep(3.0)
 
     def go_home(self) -> None:
         self.auto.home()
