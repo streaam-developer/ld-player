@@ -1,0 +1,7 @@
+Place a pre-compiled redsocks binary (ARM64 Linux) here as `redsocks_arm64`.
+
+Build from source:
+  git clone https://github.com/semigodking/redsocks.git
+  cd redsocks
+  # Cross-compile for Android ARM64 using NDK
+  # Or use a pre-built binary from releases

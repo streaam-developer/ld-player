@@ -209,10 +209,17 @@ def create_signup_instance(console: LdConsole, name: str,
     # Chrome + the heavy Outlook web app stay responsive
     profile = apply_profile(console, name=name, cpu=4, memory=4096)
     adb_ok = _enable_adb(inst.index)
+    # enable root so per-app proxy (iptables) can work later
+    try:
+        console.modify(name=name, root=1)
+        root_ok = True
+    except Exception:  # noqa: BLE001
+        root_ok = False
     print(f"[{name}] fresh instance ready (index {inst.index}, "
           f"{'cloned from ' + src.name if src else 'blank'}) — "
           f"random mobile: {profile.summary()}"
-          + ("" if adb_ok else " [WARN: could not force adbDebug on]"),
+          + ("" if adb_ok else " [WARN: could not force adbDebug on]")
+          + ("" if root_ok else " [WARN: could not enable root]"),
           flush=True)
     return inst
 

@@ -42,6 +42,8 @@ from ldplayer.console import LdConsole
 from ldplayer.facebook import FacebookFlow, find_facebook_apk
 from ldplayer.outlook import (FIRST_NAMES, LAST_NAMES, OutlookFlow,
                               create_signup_instance, new_instance_name)
+from ldplayer.proxy import (ProxyError, is_proxy_active,
+                            setup_per_app_proxy, teardown_per_app_proxy)
 
 CHROME_PACKAGE = "com.android.chrome"
 FB_PACKAGE = "com.facebook.katana"
@@ -146,14 +148,34 @@ def main() -> int:
     p.add_argument("--boot-timeout", type=float, default=900)
     p.add_argument("--flow-timeout", type=float, default=1800,
                    help="seconds allowed PER phase")
+    p.add_argument("--proxy",
+                   help="HTTP proxy for Facebook traffic only "
+                        "(format: host:port — e.g. 1.2.3.4:8080)")
     args = p.parse_args()
 
     console = LdConsole(find_ldconsole())
     cfg = load_config()
     adb = Adb(cfg["adb"])
 
+    # parse --proxy host:port
+    proxy_host = ""
+    proxy_port = 0
+    if args.proxy:
+        parts = args.proxy.rsplit(":", 1)
+        if len(parts) == 2 and parts[1].isdigit():
+            proxy_host = parts[0]
+            proxy_port = int(parts[1])
+        else:
+            print(f"ERROR: invalid proxy format '{args.proxy}' — "
+                  f"expected host:port", flush=True)
+            return 1
+
     first = args.first_name or random.choice(FIRST_NAMES)
     last = args.last_name or random.choice(LAST_NAMES)
+
+    # pre-init for cleanup in except handlers
+    oflow = None
+    proxy_active = False
 
     try:
         # ================================================== PHASE 1: outlook
@@ -196,6 +218,17 @@ def main() -> int:
         print(f"[{oflow.inst.name}] back to the launcher ...", flush=True)
         oflow.auto.home()
         time.sleep(2)
+
+        # --- set up per-app proxy for Facebook only ---
+        proxy_active = False
+        if proxy_host and proxy_port:
+            try:
+                setup_per_app_proxy(adb, oflow.inst.index,
+                                    FB_PACKAGE, proxy_host, proxy_port)
+                proxy_active = True
+            except ProxyError as exc:
+                print(f"[{oflow.inst.name}] PROXY SETUP FAILED: {exc} — "
+                      f"continuing without proxy", flush=True)
 
         fflow = FacebookFlow(console, adb, index=oflow.inst.index)
 
@@ -245,7 +278,14 @@ def main() -> int:
                 # 'use your account' / human-verification block: this
                 # instance is burned — close it and wipe all its data
                 _discard_instance(console, oflow.inst)
+            # tear down proxy before exiting
+            if proxy_active:
+                teardown_per_app_proxy(adb, oflow.inst.index)
             return 1
+
+        # tear down proxy after successful run
+        if proxy_active:
+            teardown_per_app_proxy(adb, oflow.inst.index)
 
         print(f"[{oflow.inst.name}] Instance stays open — Ctrl+C to stop.",
               flush=True)
@@ -253,10 +293,14 @@ def main() -> int:
             time.sleep(30)
     except KeyboardInterrupt:
         print("\ninterrupted — instance left running.", flush=True)
+        if proxy_active and oflow is not None:
+            teardown_per_app_proxy(adb, oflow.inst.index)
         return 0
     except Exception as exc:  # noqa: BLE001
         print(f"\nERROR: {exc}", flush=True)
         traceback.print_exc()
+        if proxy_active and oflow is not None:
+            teardown_per_app_proxy(adb, oflow.inst.index)
         return 1
     return 0
 

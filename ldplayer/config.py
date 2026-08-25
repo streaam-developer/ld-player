@@ -149,6 +149,7 @@ def _defaults() -> dict:
         "command_timeout": 300,
         "cf_worker_url": "",
         "cf_worker_api_key": "",
+        "proxy": "",
     }
 
 
