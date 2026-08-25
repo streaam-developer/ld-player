@@ -1189,6 +1189,31 @@ class FacebookFlow(StepLogger):
         return False
 
     # --------------------------------------------------------------- runner
+    def _is_facebook_foreground(self) -> bool:
+        """True when Facebook's activity is in the foreground."""
+        try:
+            act = self.auto.focused_activity() or ""
+        except Exception:  # noqa: BLE001
+            return False
+        return "facebook" in act.lower()
+
+    def _relaunch_facebook(self, timeout: float = 60) -> bool:
+        """Try to bring Facebook back to the foreground. Returns True on success."""
+        self.step("relaunch", "Facebook not in foreground — relaunching ...")
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                self.inst.run_app(self.package)
+            except Exception:  # noqa: BLE001
+                pass
+            time.sleep(3.0)
+            if self._is_facebook_foreground():
+                self.step("relaunch_ok", "Facebook back in the foreground")
+                return True
+            if not self._am_start():
+                time.sleep(5.0)
+        return False
+
     def run(self, step_wait: float = 3.0, hold: bool = False,
             grant_perms: bool = True, boot_timeout: float = 600,
             install_timeout: float = 840,
@@ -1305,6 +1330,26 @@ class FacebookFlow(StepLogger):
                         stall += 1
                         self.step("stall",
                                   f"unrecognised screen ({stall} consecutive)")
+
+                        # --- crash detection: Facebook gone from foreground ---
+                        if stall >= 3 and not self._is_facebook_foreground():
+                            self.step("crash_detect",
+                                      "Facebook NOT in foreground — "
+                                      "app may have crashed")
+                            if self._relaunch_facebook(timeout=45):
+                                stall = 0
+                                self.step("crash_recovered",
+                                          "Facebook relaunched — resuming")
+                                time.sleep(3)
+                                continue
+                            else:
+                                self.step("crash_fail",
+                                          "could not bring Facebook back — "
+                                          "aborting")
+                                self._update_tracker(success=False)
+                                self.success = ""
+                                return self.report
+
                         # BACK would close an open DatePicker popup — the
                         # birthday handler needs it, so never press it here
                         if (stall % 5 == 0
