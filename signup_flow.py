@@ -49,10 +49,22 @@ from ldplayer.proxy import (ProxyError, setup_per_app_proxy,
 
 CHROME_PACKAGE = "com.android.chrome"
 FB_PACKAGE = "com.facebook.katana"
+SUCCESSFUL_FILE = "successful.txt"
+BLOCKED_FILE = "blocked.txt"
 
 # shared counters for the summary line at the end
 _lock = threading.Lock()
 _results: list[dict] = []
+
+
+def _save_credential(email: str, password: str, filepath: str) -> None:
+    """Append email|password to *filepath* (thread-safe)."""
+    if not email or not password:
+        return
+    line = f"{email}|{password}\n"
+    with _lock:
+        with open(filepath, "a", encoding="utf-8") as fh:
+            fh.write(line)
 
 
 def _keep_alive(adb: Adb, index: int, quiet: bool = False) -> None:
@@ -192,7 +204,15 @@ def _run_outlook_mode(console: LdConsole, adb: Adb, args: argparse.Namespace,
 
         result = _report(oflow.inst.name, "outlook", fflow, t_start,
                          t_phase1, t_phase2, oflow.outlook_address)
-        if fflow.success != "success" and fflow.success == "blocked":
+
+        if fflow.success == "success":
+            _save_credential(oflow.outlook_address, fflow._password,
+                             SUCCESSFUL_FILE)
+            print(f"[{oflow.inst.name}] instance stays open "
+                  f"(saved to {SUCCESSFUL_FILE})", flush=True)
+        elif fflow.success == "blocked":
+            _save_credential(oflow.outlook_address, fflow._password,
+                             BLOCKED_FILE)
             _discard_instance(console, oflow.inst)
         return result
 
@@ -248,7 +268,13 @@ def _run_custom_mode(console: LdConsole, adb: Adb, args: argparse.Namespace,
 
         result = _report(name, "custom", fflow, t_start,
                          None, None, email)
-        if fflow.success != "success" and fflow.success == "blocked":
+
+        if fflow.success == "success":
+            _save_credential(email, fflow._password, SUCCESSFUL_FILE)
+            print(f"[{name}] instance stays open "
+                  f"(saved to {SUCCESSFUL_FILE})", flush=True)
+        elif fflow.success == "blocked":
+            _save_credential(email, fflow._password, BLOCKED_FILE)
             _discard_instance(console, inst)
         return result
 
@@ -443,6 +469,10 @@ def main() -> int:
     print(f"\n{'=' * 60}", flush=True)
     print(f"[main] DONE — {ok} succeeded, {fail} failed "
           f"out of {len(_results)}", flush=True)
+    if ok:
+        print(f"[main]   saved to {SUCCESSFUL_FILE}", flush=True)
+    if fail:
+        print(f"[main]   saved to {BLOCKED_FILE}", flush=True)
     for r in _results:
         tag = "OK" if r["ok"] else "FAIL"
         print(f"  [{tag}] {r['name']} — {r['email']} "
