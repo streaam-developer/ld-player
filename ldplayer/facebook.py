@@ -300,7 +300,7 @@ class FacebookFlow(StepLogger):
                 break
         self._dismiss_interstitial_popups()
 
-    def _dismiss_interstitial_popups(self, timeout: float = 30) -> None:
+    def _dismiss_interstitial_popups(self, timeout: float = 10) -> None:
         """Dismiss Facebook interstitial popups (login prompts, cookie banners, etc.)."""
         start = time.time()
         while time.time() - start < timeout:
@@ -310,13 +310,13 @@ class FacebookFlow(StepLogger):
                 if pos:
                     self.step("popup_dismiss", f"dismissing popup: tapping '{popup_text}'")
                     self.auto.tap(*pos)
-                    time.sleep(2)
+                    time.sleep(1)
                     dismissed = True
                     break
             if not dismissed:
                 break
 
-    def click_login_create_account(self, timeout: float = 180,
+    def click_login_create_account(self, timeout: float = 60,
                                    hold: bool = False) -> None:
         # the app may have resumed straight into the signup flow
         # (e.g. relaunched while the name screen was still on top)
@@ -330,8 +330,8 @@ class FacebookFlow(StepLogger):
         text, pos = self._wait_for_any_text_with_retry(
             SIGNUP_ENTRY_BUTTONS, timeout, press_back=False)
         self.step("login_cna_click", f"clicking '{text}' at {pos}")
-        self.auto.tap(*pos, wait=2)
-        self._wait_for_screen_change(SIGNUP_ENTRY_BUTTONS, timeout=30)
+        self.auto.tap(*pos, wait=1)
+        self._wait_for_screen_change(SIGNUP_ENTRY_BUTTONS, timeout=10)
         if hold:
             input("Paused on the create-account screen. Press Enter to "
                   "continue...")
@@ -356,8 +356,8 @@ class FacebookFlow(StepLogger):
                 pos = self.auto.find_text(t)
                 if pos:
                     self.step("form_cna_click", f"clicking '{t}' at {pos}")
-                    self.auto.tap(*pos, wait=2)
-                    self._wait_for_screen_change(t, timeout=30)
+                    self.auto.tap(*pos, wait=1)
+                    self._wait_for_screen_change(t, timeout=10)
                     return
             time.sleep(1.5)
         self.step("form_warn",
@@ -441,8 +441,8 @@ class FacebookFlow(StepLogger):
         self.step("screen_change_warn",
                   f"{texts} still visible after {timeout}s — continuing anyway")
 
-    def _wait_for_text_with_retry(self, text: str, timeout: float = 120,
-                                  max_retries: int = 3) -> tuple[int, int]:
+    def _wait_for_text_with_retry(self, text: str, timeout: float = 30,
+                                  max_retries: int = 2) -> tuple[int, int]:
         """Wait for text with retries — if the UI is still settling,
         dump + tap again after a short back-off."""
         last_error: AutomationError | None = None
@@ -456,7 +456,7 @@ class FacebookFlow(StepLogger):
                               f"(attempt {attempt}/{max_retries}) — "
                               f"backing off and retrying...")
                     self.auto.back()
-                    time.sleep(3)
+                    time.sleep(1)
         raise AutomationError(
             f"could not find '{text}' after {max_retries} attempts: {last_error}")
 
@@ -475,7 +475,7 @@ class FacebookFlow(StepLogger):
                 if pos:
                     self.step("permission_allow", f"permission dialog: "
                                                   f"tapping '{button}' at {pos}")
-                    self.auto.tap(*pos, wait=2)
+                    self.auto.tap(*pos, wait=1)
                     handled_any = True
                     break
             else:
@@ -492,7 +492,7 @@ class FacebookFlow(StepLogger):
 
     # -------------------------------------------------------- name entry
     def enter_name(self, first_name: str, last_name: str,
-                   timeout: float = 60) -> None:
+                   timeout: float = 30) -> None:
         """Wait for the 'What's your name?' screen, tap the first-name
         field, type, then tap the last-name field, type, and press Next."""
         self.step("name_screen", f"waiting for '{NAME_SCREEN_HEADER}' ...")
@@ -524,14 +524,14 @@ class FacebookFlow(StepLogger):
         next_pos = self._wait_for_text_with_retry(NEXT_BUTTON, timeout)
         self.step("name_next", f"clicking Next at {next_pos}")
         self.auto.tap(*next_pos, wait=2)
-        self._wait_for_screen_change(NEXT_BUTTON, timeout=30)
+        self._wait_for_screen_change(NEXT_BUTTON, timeout=10)
 
     # -------------------------------------------------------- birthday
     def _date_picker_open(self) -> bool:
         """True when the Android DatePicker popup is showing."""
         return bool(self.auto.find_by_class("DatePicker"))
 
-    def set_birthday(self, timeout: float = 90,
+    def set_birthday(self, timeout: float = 45,
                      min_age_years: int = 21) -> None:
         """Set a birth date at least ``min_age_years`` in the past.
 
@@ -674,7 +674,7 @@ class FacebookFlow(StepLogger):
             if value is None:
                 # unreadable (mid-animation): gentle backward nudge
                 self.auto.swipe(x, cy - 60, x, cy + 60,
-                                duration_ms=300, wait=0.4)
+                                duration_ms=200, wait=0.15)
                 continue
 
             dist = abs(value - target)
@@ -693,13 +693,13 @@ class FacebookFlow(StepLogger):
 
             if dist <= 3:
                 # final approach: one row per swipe, verified every time
-                self.auto.swipe(x, y1, x, y2, duration_ms=320, wait=0.45)
+                self.auto.swipe(x, y1, x, y2, duration_ms=200, wait=0.12)
                 continue
 
             # bulk distance: burst of single-row swipes, then re-read
-            burst = min(dist - 1, 6)
+            burst = min(dist - 1, 18)
             for _i in range(burst):
-                self.auto.swipe(x, y1, x, y2, duration_ms=280, wait=0.2)
+                self.auto.swipe(x, y1, x, y2, duration_ms=150, wait=0.05)
 
         raise AutomationError(
             f"wheel[{pos}] did not reach {target} in time")
@@ -714,31 +714,21 @@ class FacebookFlow(StepLogger):
             return False
         self.step("next_click", f"clicking Next at {next_pos}")
         self.auto.tap(*next_pos, wait=2)
-        self._wait_for_screen_change(NEXT_BUTTON, timeout=30)
+        self._wait_for_screen_change(NEXT_BUTTON, timeout=10)
         return True
 
     # -------------------------------------------------------- gender
     def select_gender(self, gender: str = "Male",
-                      timeout: float = 60) -> None:
-        """Tap the requested gender option, then press Next.
-
-        Tolerates screens where the 'What's your gender?' header text is
-        worded differently — the option itself is what matters.
-        """
-        start = time.time()
-        while time.time() - start < timeout:
-            if self.auto.find_text(gender):
-                break
-            time.sleep(1.5)
-
+                      timeout: float = 30) -> None:
+        """Tap the requested gender option, then press Next."""
         self.step("gender_select", f"selecting '{gender}' ...")
         pos = self._wait_for_text_with_retry(gender, timeout)
-        self.auto.tap(*pos, wait=1.5)
+        self.auto.tap(*pos, wait=1)
 
         next_pos = self._wait_for_text_with_retry(NEXT_BUTTON, timeout)
         self.step("gender_next", f"clicking Next at {next_pos}")
-        self.auto.tap(*next_pos, wait=2)
-        self._wait_for_screen_change(NEXT_BUTTON, timeout=30)
+        self.auto.tap(*next_pos, wait=1)
+        self._wait_for_screen_change(NEXT_BUTTON, timeout=10)
 
     # -------------------------------------------------------- manual input
     def _manual_banner(self, lines: list[str]) -> None:
@@ -823,7 +813,7 @@ class FacebookFlow(StepLogger):
 
     # -------------------------------------------------------- email signup
     def enter_email(self, email: str | None = None,
-                    timeout: float = 60) -> None:
+                    timeout: float = 30) -> None:
         """Get to the email-entry screen (tapping 'Sign up with email' if
         the mobile-number screen appears first), type the address, press
         Next.
@@ -842,7 +832,7 @@ class FacebookFlow(StepLogger):
             if btn:
                 self.step("email_switch", "tapping 'Sign up with email' ...")
                 self.auto.tap(*btn, wait=2)
-                self._wait_for_screen_change(SIGN_UP_WITH_EMAIL, timeout=30)
+                self._wait_for_screen_change(SIGN_UP_WITH_EMAIL, timeout=10)
                 continue
             time.sleep(1.5)
         if not on_email_screen:
@@ -887,7 +877,7 @@ class FacebookFlow(StepLogger):
         next_pos = self._wait_for_text_with_retry(NEXT_BUTTON, timeout)
         self.step("email_next", f"clicking Next at {next_pos}")
         self.auto.tap(*next_pos, wait=2)
-        self._wait_for_screen_change(NEXT_BUTTON, timeout=30)
+        self._wait_for_screen_change(NEXT_BUTTON, timeout=10)
 
     @staticmethod
     def _random_email(length: int = 7) -> str:
@@ -898,7 +888,7 @@ class FacebookFlow(StepLogger):
 
     # -------------------------------------------------------- password
     def create_password(self, password: str | None = None,
-                        timeout: float = 60) -> None:
+                        timeout: float = 30) -> None:
         """Type a strong password, press Next, then save email|password
         to ``raw.txt``."""
         if not self.auto.find_text(PASSWORD_SCREEN_HEADER):
@@ -926,7 +916,7 @@ class FacebookFlow(StepLogger):
         next_pos = self._wait_for_text_with_retry(NEXT_BUTTON, timeout)
         self.step("password_next", f"clicking Next at {next_pos}")
         self.auto.tap(*next_pos, wait=2)
-        self._wait_for_screen_change(NEXT_BUTTON, timeout=30)
+        self._wait_for_screen_change(NEXT_BUTTON, timeout=10)
 
         self._save_credentials()
 
@@ -999,7 +989,7 @@ class FacebookFlow(StepLogger):
 
         self.step("terms_click", "looking for 'I agree' button ...")
         pos = self._wait_for_text_with_retry(I_AGREE_BUTTON, timeout)
-        self.auto.tap(*pos, wait=2)
+        self.auto.tap(*pos, wait=1)
 
         # wait for terms to process — exit early the moment the screen
         # content changes instead of sleeping the full window blindly
@@ -1405,7 +1395,7 @@ class FacebookFlow(StepLogger):
             stall = 0
 
         # flow window over — final human-block scan decides success
-        blocked = self.check_human_block(timeout=20)
+        blocked = self.check_human_block(timeout=5)
         self._update_tracker(success=not blocked)
         if blocked:
             self.success = "blocked"
