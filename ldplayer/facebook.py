@@ -336,7 +336,7 @@ class FacebookFlow(StepLogger):
             input("Paused on the create-account screen. Press Enter to "
                   "continue...")
 
-    def submit_create_form(self, timeout: float = 120) -> None:
+    def submit_create_form(self, timeout: float = 45) -> None:
         """Handle whatever follows the signup entry tap.
 
         Classic builds show an intermediate screen with a second
@@ -1280,7 +1280,7 @@ class FacebookFlow(StepLogger):
                         screen = "confirmation"
                         self.wait_for_confirmation(otp_timeout=otp_timeout)
                         done.add("confirmation")
-                        break  # final human-block scan decides success
+                        # loop continues — terms/I agree screen comes after
 
                     self._update_tracker(success=False)
                     self.success = "blocked"
@@ -1291,7 +1291,7 @@ class FacebookFlow(StepLogger):
                 elif screen == "confirmation":
                     self.wait_for_confirmation(otp_timeout=otp_timeout)
                     done.add("confirmation")
-                    break  # final human-block scan below decides success
+                    # loop continues — terms/I agree screen comes after
 
                 elif screen == "terms" and "terms" not in done:
                     self.agree_to_terms()
@@ -1395,7 +1395,7 @@ class FacebookFlow(StepLogger):
             stall = 0
 
         # flow window over — final human-block scan decides success
-        blocked = self.check_human_block(timeout=5)
+        blocked = self.check_human_block(timeout=15)
         self._update_tracker(success=not blocked)
         if blocked:
             self.success = "blocked"

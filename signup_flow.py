@@ -453,7 +453,7 @@ def main() -> int:
                                      proxy_host, proxy_port,
                                      first, last, cfg)
             futures[future] = i
-            time.sleep(2)   # stagger launches so adb discovery doesn't clash
+            time.sleep(20)   # stagger launches so boot doesn't clash
 
         # wait for all workers
         for future in as_completed(futures):
