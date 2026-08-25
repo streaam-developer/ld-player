@@ -174,7 +174,8 @@ def new_instance_name(prefix: str, console: LdConsole) -> str:
 
 
 def create_signup_instance(console: LdConsole, name: str,
-                           template: str | None = None):
+                           template: str | None = None,
+                           cpu: int = 4, memory: int = 4096):
     """Create a FRESH instance every run: blank or cloned from *template*,
     with a unique random phone identity and adb debugging forced on."""
     if console.find(name=name):
@@ -205,9 +206,10 @@ def create_signup_instance(console: LdConsole, name: str,
     if not inst:
         raise OutlookError(f"create failed: {res.text or res.stderr}")
 
-    # signup instances get extra headroom: 4 CPU cores + 4 GB RAM so
-    # Chrome + the heavy Outlook web app stay responsive
-    profile = apply_profile(console, name=name, cpu=4, memory=4096)
+    # signup instances get configurable resources:
+    # outlook mode: 4 CPU / 4 GB (Chrome needs headroom)
+    # custom mode:  2 CPU / 2 GB (Facebook-only, lighter)
+    profile = apply_profile(console, name=name, cpu=cpu, memory=memory)
     adb_ok = _enable_adb(inst.index)
     # enable root so per-app proxy (iptables) can work later
     try:
