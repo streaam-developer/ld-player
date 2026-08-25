@@ -114,8 +114,17 @@ EMAIL_TEXT_RE = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
 HUMAN_BLOCK_FRAGMENTS = ["suspicious", "unusual activity",
                          "use your account", "temporarily locked",
                          "locked out", "prove you're human",
-                         "prove you’re human", "are you a human",
+                         "prove you're human", "are you a human",
                          "not a robot"]
+
+#: Screens that appear AFTER successful signup — the flow is done
+POST_SIGNUP_HEADERS = ["find friends", "add friends", "add a photo",
+                       "add profile picture", "turn on notifications",
+                       "save login info", "save your login",
+                       "log in with one tap", "choose profile picture",
+                       "upload a photo", "your account is ready",
+                       "welcome to facebook", "let's get started",
+                       "get started", "not now"]
 
 #: File to save generated credentials
 CREDENTIALS_FILE = "raw.txt"
@@ -1159,6 +1168,8 @@ class FacebookFlow(StepLogger):
         ("birthday", (BIRTHDAY_SCREEN_HEADER, "birthday")),
         ("name", (NAME_SCREEN_HEADER,)),
         ("entry", tuple(t.lower() for t in SIGNUP_ENTRY_BUTTONS)),
+        # post-signup screens — signup is done, success
+        ("post_signup", tuple(h.lower() for h in POST_SIGNUP_HEADERS)),
     ]
 
     def _screen_labels(self) -> list[str]:
@@ -1245,6 +1256,7 @@ class FacebookFlow(StepLogger):
         done: set[str] = set()
         attempts: dict[str, int] = {}
         stall = 0
+        MAX_STALL = 20  # hard abort after this many consecutive unknowns
         deadline = time.time() + flow_timeout
 
         while time.time() < deadline:
@@ -1322,6 +1334,16 @@ class FacebookFlow(StepLogger):
                     self.submit_create_form()
                     done.add("entry")
 
+                elif screen == "post_signup":
+                    # post-signup screen = signup succeeded
+                    self.step("post_signup",
+                              "post-signup screen detected — signup complete")
+                    self._update_tracker(success=True)
+                    self.success = "success"
+                    self.step("done",
+                              "flow complete — account created successfully")
+                    return self.report
+
                 else:
                     # unknown screen / stage already complete
                     if self._tap_permission_if_present():
@@ -1330,6 +1352,15 @@ class FacebookFlow(StepLogger):
                         stall += 1
                         self.step("stall",
                                   f"unrecognised screen ({stall} consecutive)")
+
+                        # --- hard abort: too many unknowns ---
+                        if stall >= MAX_STALL:
+                            self.step("stall_abort",
+                                      f"stuck on unknown screen for "
+                                      f"{stall} visits — aborting")
+                            self._update_tracker(success=False)
+                            self.success = ""
+                            return self.report
 
                         # --- crash detection: Facebook gone from foreground ---
                         if stall >= 3 and not self._is_facebook_foreground():
@@ -1352,8 +1383,10 @@ class FacebookFlow(StepLogger):
 
                         # BACK would close an open DatePicker popup — the
                         # birthday handler needs it, so never press it here
-                        if (stall % 5 == 0
+                        if (stall % 3 == 0
                                 and not self._date_picker_open()):
+                            self.step("stall_back",
+                                      "pressing back to escape unknown screen")
                             self.auto.back()
                             time.sleep(1.5)
                         time.sleep(2)

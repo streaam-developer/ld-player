@@ -214,6 +214,11 @@ def _run_outlook_mode(console: LdConsole, adb: Adb, args: argparse.Namespace,
             _save_credential(oflow.outlook_address, fflow._password,
                              BLOCKED_FILE)
             _discard_instance(console, oflow.inst)
+        else:
+            # crashed / aborted / error — instance is useless, delete it
+            print(f"[{oflow.inst.name}] flow aborted — deleting instance",
+                  flush=True)
+            _discard_instance(console, oflow.inst)
         return result
 
     finally:
@@ -275,6 +280,10 @@ def _run_custom_mode(console: LdConsole, adb: Adb, args: argparse.Namespace,
                   f"(saved to {SUCCESSFUL_FILE})", flush=True)
         elif fflow.success == "blocked":
             _save_credential(email, fflow._password, BLOCKED_FILE)
+            _discard_instance(console, inst)
+        else:
+            # crashed / aborted / error — instance is useless, delete it
+            print(f"[{name}] flow aborted — deleting instance", flush=True)
             _discard_instance(console, inst)
         return result
 
