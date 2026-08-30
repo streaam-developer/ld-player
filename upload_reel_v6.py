@@ -144,7 +144,9 @@ class LDController:
         for i in range(retries + 1):
             try:
                 r = subprocess.run([self.adb, "-s", self.device, "shell", cmd],
-                                   capture_output=True, text=True, timeout=90)
+                                   capture_output=True, text=True,
+                                   encoding="utf-8", errors="ignore",
+                                   timeout=90)
                 blob = r.stdout + r.stderr
                 if TRANSPORT_LOST.search(blob):
                     self._kick_adb()
@@ -195,7 +197,8 @@ class LDController:
         time.sleep(w)
 
     def text_type(self, t, w=0.5):
-        payload = t.replace(" ", "%s").replace("'", "'\\''")
+        payload = (t.replace("\r", " ").replace("\n", " ")
+                   .replace(" ", "%s").replace("'", "'\\''"))
         self.shell_raw(f"input text '{payload}'", w)
 
     # ------------------------------------------------------------------- ui
@@ -205,7 +208,9 @@ class LDController:
             try:
                 r = subprocess.run([self.adb, "-s", self.device, "shell",
                                     "cat", "/sdcard/ui.xml"],
-                                   capture_output=True, text=True, timeout=10)
+                                   capture_output=True, text=True,
+                                   encoding="utf-8", errors="ignore",
+                                   timeout=10)
                 if "<node" in r.stdout:
                     return r.stdout
             except Exception:
@@ -247,6 +252,53 @@ class LDController:
             x1, y1, x2, y2 = map(int, m[0])
             return ((x1 + x2) // 2, (y1 + y2) // 2)
         return None
+
+    def _gallery_tiles(self, timeout=15):
+        """Centres of the "Create reel with <Type>, item N ..." tiles."""
+        start = time.time()
+        while time.time() - start < timeout:
+            xml = self.get_ui()
+            tiles = []
+            try:
+                root = ET.fromstring(xml)
+                for e in root.iter("node"):
+                    d = e.get("content-desc", "") or ""
+                    if re.search(r"item \d+", d, re.I):
+                        pos = self._center(e)
+                        if pos:
+                            tiles.append((pos, d))
+            except Exception:
+                pass
+            if tiles:
+                return tiles
+            time.sleep(0.5)
+        return []
+
+    def _edit_fields(self, timeout=10):
+        """(centre, visible text) of every EditText currently on screen."""
+        start = time.time()
+        while time.time() - start < timeout:
+            xml = self.get_ui()
+            fields = []
+            try:
+                root = ET.fromstring(xml)
+                for e in root.iter("node"):
+                    if "EditText" in e.get("class", ""):
+                        pos = self._center(e)
+                        if pos:
+                            fields.append(
+                                (pos, (e.get("text", "") or "").strip()))
+            except Exception:
+                pass
+            if fields:
+                return fields
+            time.sleep(0.5)
+        return []
+
+    def _keyboard_open(self):
+        out = self.shell_raw("dumpsys input_method | grep -E 'mInputShown'",
+                             0.3)
+        return bool(out and "mInputShown=true" in out)
 
     def tap_find(self, text=None, desc=None, wait=1, timeout=10):
         start = time.time()
@@ -383,6 +435,8 @@ class LDController:
                        "Camera", "ScreenRecorder", "Screenshots",
                        "downrec", "face", "Instagram"):
             self.shell_raw(f"rm -rf {root}/{folder}", 0.3)
+        self.shell_raw("rm -rf /sdcard/DCIM/Camera/_up_*.png", 0.3)
+        self.shell_raw("rm -f /storage/emulated/0/_up_*.png", 0.3)
         self.shell_raw("rm -rf /storage/sdcard0/Pictures/temp", 0.3)
 
         print("  [purge] Stopping media scanner...")
@@ -399,9 +453,13 @@ class LDController:
         after = self._count_media(root)
         print(f"  [purge] Gallery-visible media: {before} -> {after} remaining")
 
+        print("  [purge] Wiping the MediaStore database...")
+        for pkg in ("com.android.providers.media",
+                    "com.android.providers.media.module"):
+            self.shell_raw(f"pm clear {pkg} 2>/dev/null", 1.5)
+        time.sleep(1)
+
         self.shell_raw(f"mkdir -p {root}/DCIM/Camera", 0.3)
-        self.shell_raw("am broadcast -a android.intent.action.MEDIA_MOUNTED "
-                       f"-d file://{root}", 1)
         if after > 0:
             print(f"  [purge] WARNING: {after} media file(s) still present")
             return False
@@ -439,17 +497,21 @@ class LDController:
             print(f"  1.mp4 verified on device ({size} bytes)")
         else:
             print(f"  WARNING: imported file size mismatch ({size} vs {want})")
-        self.shell_raw("am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE "
-                       "-d file:///sdcard/DCIM/Camera/1.mp4", 2)
+        for path in ("/sdcard/DCIM/Camera/1.mp4",
+                     "/storage/emulated/0/DCIM/Camera/1.mp4"):
+            self.shell_raw("am broadcast -a "
+                           "android.intent.action.MEDIA_SCANNER_SCAN_FILE "
+                           f"-d file://{path}", 2)
         time.sleep(5)
         return ok
 
     def force_refresh_gallery(self):
         print("  Refreshing gallery (rescan media store)...")
-        self._stop_media_services()
-        time.sleep(2)
-        self.shell_raw("am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE "
-                       "-d file:///storage/emulated/0/DCIM/Camera/1.mp4", 2)
+        for path in ("/sdcard/DCIM/Camera/1.mp4",
+                     "/storage/emulated/0/DCIM/Camera/1.mp4"):
+            self.shell_raw("am broadcast -a "
+                           "android.intent.action.MEDIA_SCANNER_SCAN_FILE "
+                           f"-d file://{path}", 1)
         time.sleep(3)
 
     def wait_for_upload_complete(self, max_wait=60):
@@ -464,19 +526,16 @@ class LDController:
 
     def screenshot(self, name="shot"):
         ts = datetime.now().strftime("%H%M%S_%f")[:-3]
-        remote = "/sdcard/_up_" + ts + ".png"
-        subprocess.run([self.adb, "-s", self.device, "shell",
-                        "screencap", "-p", remote],
-                       capture_output=True, timeout=30)
         p = self.dir / f"{name}_{ts}.png"
         try:
-            subprocess.run([self.adb, "-s", self.device, "pull",
-                            remote, str(p)], capture_output=True, timeout=30)
+            r = subprocess.run([self.adb, "-s", self.device, "exec-out",
+                                "screencap", "-p"],
+                               capture_output=True, timeout=30)
+            if r.returncode == 0 and r.stdout:
+                p.write_bytes(r.stdout)
+                return p
         except Exception:
             pass
-        if p.exists() and p.stat().st_size > 0:
-            self.shell_raw(f"rm -f {remote}", 0.1)
-            return p
         return None
 
 
@@ -603,22 +662,20 @@ class ReelUploaderV6:
             self.step(11, "Selecting 1.mp4 from gallery")
             time.sleep(2)
             self.ld.force_refresh_gallery()
+            self.ld.shell_raw("rm -f /sdcard/_up_*.png", 0.2)
 
-            selected = False
-            for attempt in range(4):
-                items = self.ld.find_all(desc="photo")
-                if not items:
-                    items = self.ld.find_all(desc="video")
-                print(f"  Gallery items found: {len(items)} ({attempt + 1}/4)")
-                if items:
-                    first = items[0]
-                    print(f"  Selecting item at {first}")
-                    self.ld.tap(first[0], first[1], 3)
-                    selected = True
-                    break
-                time.sleep(2)
-            if not selected:
-                print("  No items found - using fallback")
+            tiles = self.ld._gallery_tiles()
+            video_tiles = [t for t in tiles if "video" in t[1].lower()]
+            pick = (video_tiles or tiles)[0] if tiles else None
+            if pick:
+                print(f"  Gallery tiles: {len(tiles)} — picking "
+                      f"{'video' if pick in video_tiles else 'first'} "
+                      f"tile at {pick[0]}")
+                print(f"  {pick[1]}")
+                self.ld.tap(pick[0][0], pick[0][1], 3)
+                selected = True
+            else:
+                print("  No gallery tiles found - using fallback")
                 self.ld.tap(180, 600, 3)
             self.ld.screenshot("step11_video_selected")
 
@@ -639,33 +696,48 @@ class ReelUploaderV6:
             time.sleep(3)
             self.ld.screenshot("step13_share_screen")
 
-            self.step(14, "Entering caption")
+            self.step(14, "Entering title & caption (caption file text)")
             time.sleep(2)
+            flat = " ".join(caption.split())
+            fields = self.ld._edit_fields(timeout=12)
+            print(f"  EditText fields found: {len(fields)}")
+            for pos, txt in fields:
+                print(f"    {pos} {txt[:50]!r}")
+
+            def fill_field(label, matcher):
+                fields = self.ld._edit_fields(timeout=8)
+                pick = next((f for f in fields if matcher(f[1].lower())),
+                            None)
+                if pick is None and label == "caption":
+                    pick = next((f for f in fields
+                                 if f[1].strip() and caption not in f[1]),
+                                None)
+                if pick is None:
+                    print(f"  {label} field not found")
+                    return False
+                pos, txt = pick
+                print(f"  Filling {label} field at {pos} "
+                      f"({txt[:40]!r})")
+                self.ld.tap(pos[0], pos[1], 1)
+                time.sleep(0.5)
+                self.ld.key("KEYCODE_MOVE_END", 0.2)
+                for _ in range(40):
+                    self.ld.key("KEYCODE_DEL", 0.02)
+                self.ld.text_type(caption, 1.2)
+                time.sleep(1.2)
+                return True
+
             caption_entered = False
-
-            xml = self.ld.get_ui()
-            try:
-                root = ET.fromstring(xml)
-                for e in root.iter("node"):
-                    if "EditText" in e.get("class", ""):
-                        pos = self.ld._center(e)
-                        if pos:
-                            print(f"  Found EditText at {pos}")
-                            self.ld.tap(pos[0], pos[1], 1)
-                            self.ld.key("KEYCODE_MOVE_END", 0.2)
-                            for _ in range(40):
-                                self.ld.key("KEYCODE_DEL", 0.02)
-                            self.ld.text_type(caption, 1)
-                            caption_entered = True
-                            break
-            except Exception:
-                pass
-
+            caption_entered |= fill_field(
+                "title", lambda t: "add title" in t or "title" in t)
+            caption_entered |= fill_field(
+                "caption", lambda t: ("describe" in t or "write something"
+                                      in t or "add a caption" in t
+                                      or "what's on your mind" in t))
             if not caption_entered:
                 for hint in ("Describe your reel", "Write something",
-                             "Name", "Add a caption"):
+                             "Add a caption"):
                     if self.ld.tap_find(text=hint, timeout=2):
-                        time.sleep(0.5)
                         self.ld.key("KEYCODE_MOVE_END", 0.2)
                         for _ in range(40):
                             self.ld.key("KEYCODE_DEL", 0.02)
@@ -676,17 +748,32 @@ class ReelUploaderV6:
 
             self.step(15, "Sharing reel")
             shared = False
-            for _ in range(3):
-                if self.ld.tap_find(text="Share now", timeout=5):
+            for _ in range(4):
+                if self.ld._keyboard_open():
+                    print("  Closing keyboard...")
+                    self.ld.back(1)
+                    time.sleep(1)
+                if self.ld.tap_find(text="Share now", timeout=4):
                     shared = True
                     break
-                if self.ld.tap_find(text="Share", timeout=3):
+                if self.ld.tap_find(text="Share", timeout=2):
                     shared = True
                     break
-                self.ld.back(1)
+                time.sleep(1)
             if shared:
                 print("\n  Uploading reel...")
-                time.sleep(10)
+                confirmed = False
+                for _ in range(20):
+                    time.sleep(3)
+                    if self.ld.is_on_screen("Uploading reel"):
+                        confirmed = True
+                        break
+                if confirmed:
+                    print("  Upload confirmed in progress — waiting to finish...")
+                    self.ld.wait_for_upload_complete(120)
+                else:
+                    print("  NOTE: no 'Uploading reel' indicator seen; "
+                          "continuing")
             self.ld.screenshot("step15_done")
 
             self.log("\n=== REEL UPLOAD COMPLETE ===", True)
