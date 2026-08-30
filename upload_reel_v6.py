@@ -197,9 +197,29 @@ class LDController:
         time.sleep(w)
 
     def text_type(self, t, w=0.5):
-        payload = (t.replace("\r", " ").replace("\n", " ")
-                   .replace(" ", "%s").replace("'", "'\\''"))
-        self.shell_raw(f"input text '{payload}'", w)
+        flat = " ".join(t.split())
+        for i in range(0, len(flat), 40):
+            chunk = flat[i:i + 40]
+            payload = chunk.replace(" ", "%s").replace("'", "'\\''")
+            for attempt in range(3):
+                if self._inject(f"input text '{payload}'", timeout=10) is None:
+                    print(f"  input text stalled (chunk "
+                          f"{i // 40 + 1}, attempt {attempt + 1})")
+                    time.sleep(1)
+                    continue
+                break
+            time.sleep(w)
+
+    def _inject(self, cmd, timeout=10):
+        """Run one device command with a hard timeout; None if it stalled."""
+        try:
+            r = subprocess.run([self.adb, "-s", self.device, "shell", cmd],
+                               capture_output=True, text=True,
+                               encoding="utf-8", errors="ignore",
+                               timeout=timeout)
+            return r.stdout
+        except (subprocess.TimeoutExpired, OSError):
+            return None
 
     # ------------------------------------------------------------------- ui
     def get_ui(self, attempts=3):
@@ -299,6 +319,42 @@ class LDController:
         out = self.shell_raw("dumpsys input_method | grep -E 'mInputShown'",
                              0.3)
         return bool(out and "mInputShown=true" in out)
+
+    def clear_focused_field(self, keys=40):
+        """Blast DEL keyevents into the focused field via one adb call."""
+        self._inject(f"i=0; while [ $i -lt {keys} ]; do "
+                     f"input keyevent 67; i=$((i+1)); done", timeout=15)
+
+    def _field_texts(self):
+        return [txt for _, txt in self._edit_fields(timeout=6)]
+
+    def _field_has(self, needle):
+        return any(needle.lower() in t.lower()
+                   for t in self._field_texts())
+
+    def type_caption_into(self, pos, label, caption, needle=None):
+        """Tap a field, wipe it, type the caption, verify it landed."""
+        if needle is None:
+            toks = [t.lower() for t in caption.split() if t.isalnum()]
+            needle = next((t for t in reversed(toks)
+                           if label == "caption"), "")
+            if not needle:
+                needle = next((t for t in toks if label != "caption"), "")
+        if not needle:
+            return False
+        for attempt in range(3):
+            self.tap(pos[0], pos[1], 1.0)
+            time.sleep(0.5)
+            self.key("KEYCODE_MOVE_END", 0.2)
+            self.clear_focused_field()
+            self.text_type(caption, 0.4)
+            time.sleep(1.0)
+            if self._field_has(needle):
+                print(f"  {label} field filled and verified")
+                return True
+            print(f"  {label} field did not verify "
+                  f"(attempt {attempt + 1}/3)")
+        return False
 
     def tap_find(self, text=None, desc=None, wait=1, timeout=10):
         start = time.time()
@@ -698,49 +754,51 @@ class ReelUploaderV6:
 
             self.step(14, "Entering title & caption (caption file text)")
             time.sleep(2)
-            flat = " ".join(caption.split())
             fields = self.ld._edit_fields(timeout=12)
             print(f"  EditText fields found: {len(fields)}")
             for pos, txt in fields:
                 print(f"    {pos} {txt[:50]!r}")
 
-            def fill_field(label, matcher):
+            def find_field(matcher):
                 fields = self.ld._edit_fields(timeout=8)
-                pick = next((f for f in fields if matcher(f[1].lower())),
-                            None)
-                if pick is None and label == "caption":
-                    pick = next((f for f in fields
-                                 if f[1].strip() and caption not in f[1]),
-                                None)
-                if pick is None:
-                    print(f"  {label} field not found")
-                    return False
-                pos, txt = pick
-                print(f"  Filling {label} field at {pos} "
-                      f"({txt[:40]!r})")
-                self.ld.tap(pos[0], pos[1], 1)
-                time.sleep(0.5)
-                self.ld.key("KEYCODE_MOVE_END", 0.2)
-                for _ in range(40):
-                    self.ld.key("KEYCODE_DEL", 0.02)
-                self.ld.text_type(caption, 1.2)
-                time.sleep(1.2)
-                return True
+                return next((f for f in fields
+                             if matcher(f[1].lower())), None)
 
+            def _CAPTION_MATCH(t):
+                return ("describe" in t or "write something" in t
+                        or "add a caption" in t or "what's on your mind" in t)
+
+            title = find_field(lambda t: "add title" in t or "title" in t)
             caption_entered = False
-            caption_entered |= fill_field(
-                "title", lambda t: "add title" in t or "title" in t)
-            caption_entered |= fill_field(
-                "caption", lambda t: ("describe" in t or "write something"
-                                      in t or "add a caption" in t
-                                      or "what's on your mind" in t))
+            if title:
+                print(f"  Filling title field at {title[0]} "
+                      f"({title[1][:40]!r})")
+                caption_entered |= self.ld.type_caption_into(
+                    title[0], "title", caption)
+            else:
+                print("  title field not found")
+
+            fields = self.ld._edit_fields(timeout=8)
+            cap = next((f for f in fields if _CAPTION_MATCH(f[1].lower())),
+                       None)
+            if cap is None:
+                cap = next((f for f in fields if f[1].strip()
+                            and caption not in f[1]), None)
+            if cap:
+                print(f"  Filling caption field at {cap[0]} "
+                      f"({cap[1][:40]!r})")
+                caption_entered |= self.ld.type_caption_into(
+                    cap[0], "caption", caption)
+            else:
+                print("  caption field not found")
+
             if not caption_entered:
                 for hint in ("Describe your reel", "Write something",
                              "Add a caption"):
                     if self.ld.tap_find(text=hint, timeout=2):
+                        pos = self.ld.find(text=hint)
                         self.ld.key("KEYCODE_MOVE_END", 0.2)
-                        for _ in range(40):
-                            self.ld.key("KEYCODE_DEL", 0.02)
+                        self.ld.clear_focused_field()
                         self.ld.text_type(caption, 1)
                         caption_entered = True
                         break
