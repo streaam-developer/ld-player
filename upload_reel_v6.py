@@ -134,6 +134,11 @@ class LDController:
                                text=True, timeout=15)
             except Exception:
                 pass
+        try:
+            subprocess.run([self.adb, "connect", self._primary_port],
+                           capture_output=True, text=True, timeout=8)
+        except Exception:
+            pass
 
     def shell_raw(self, cmd, wait=1, retries=2):
         for i in range(retries + 1):
@@ -141,7 +146,7 @@ class LDController:
                 r = subprocess.run([self.adb, "-s", self.device, "shell", cmd],
                                    capture_output=True, text=True, timeout=90)
                 blob = r.stdout + r.stderr
-                if re.search(TRANSPORT_LOST, blob, re.I):
+                if TRANSPORT_LOST.search(blob):
                     self._kick_adb()
                     time.sleep(2)
                     continue
@@ -325,24 +330,24 @@ class LDController:
 
     def _count_root_media(self, root="/storage/emulated/0"):
         out = self.shell_raw(
-            f"find {root} -maxdepth 1 -type f \\({self._media_pattern()}\\) "
+            f"find {root} -maxdepth 1 -type f \\( {self._media_pattern()} \\) "
             "2>/dev/null | wc -l", 0.2)
         return self._as_int(out)
 
     def _count_media(self, root="/storage/emulated/0", depth=8):
         out = self.shell_raw(
             f"find {root} -maxdepth {depth} "
-            "\\( -path '*/Android' -o -path '*/Android/*' -o -name '.*' \\) "
+            "\\( -name Android -type d -o -name '.*' -type d \\) "
             "-prune -o -type f "
-            f"\\({self._media_pattern()}\\) -print 2>/dev/null | wc -l", 0.2)
+            f"\\( {self._media_pattern()} \\) -print 2>/dev/null | wc -l", 0.2)
         return self._as_int(out)
 
     def _delete_media(self, root="/storage/emulated/0", depth=8):
         self.shell_raw(
             f"find {root} -maxdepth {depth} "
-            "\\( -path '*/Android' -o -path '*/Android/*' -o -name '.*' \\) "
+            "\\( -name Android -type d -o -name '.*' -type d \\) "
             "-prune -o -type f "
-            f"\\({self._media_pattern()}\\) -delete 2>/dev/null", 0.5, retries=3)
+            f"\\( {self._media_pattern()} \\) -delete 2>/dev/null", 0.5, retries=3)
 
     def _stop_media_services(self):
         for pkg in ("com.android.providers.media",
