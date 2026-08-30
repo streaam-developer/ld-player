@@ -350,10 +350,11 @@ class LDController:
             self.shell_raw(f"am force-stop {pkg}", 0.5)
 
     def _file_size(self, remote):
-        out = self.shell_raw(f"stat -c %s {remote}", 0.2)
-        m = re.search(r"\b(\d+)\b", out or "")
-        if m:
-            return int(m.group(1))
+        for path in (remote, remote.replace("/sdcard/", "/storage/emulated/0/")):
+            out = self.shell_raw(f"stat -c %s {path}", 0.2)
+            m = re.search(r"\b(\d+)\b", out or "")
+            if m:
+                return int(m.group(1))
         parts = self.shell_raw(f"ls -l {remote}", 0.2).split()
         if len(parts) >= 5:
             try:
@@ -362,6 +363,14 @@ class LDController:
                 pass
         return -1
 
+    def _wait_file_size(self, remote, want, timeout=10):
+        start = time.time()
+        while time.time() - start < timeout:
+            if self._file_size(remote) == want:
+                return True
+            time.sleep(1)
+        return False
+
     def purge_media(self):
         root = "/storage/emulated/0"
         print("  [purge] Removing known media folders...")
@@ -369,6 +378,7 @@ class LDController:
                        "Camera", "ScreenRecorder", "Screenshots",
                        "downrec", "face", "Instagram"):
             self.shell_raw(f"rm -rf {root}/{folder}", 0.3)
+        self.shell_raw("rm -rf /storage/sdcard0/Pictures/temp", 0.3)
 
         print("  [purge] Stopping media scanner...")
         self._stop_media_services()
@@ -393,29 +403,32 @@ class LDController:
         print("  [purge] All media deleted (including '0' folder root)!")
         return True
 
-    def import_1mp4(self, video_path):
+    def import_1mp4(self, video_path, dest="/sdcard/DCIM/Camera/1.mp4"):
         print(f"  Importing: {Path(video_path).name}")
-        dest = "/sdcard/DCIM/Camera/1.mp4"
         want = Path(video_path).stat().st_size
+        self.shell_raw("mkdir -p /sdcard/DCIM/Camera", 0.2)
         ok = False
         for attempt in range(1, 4):
-            cmd = (f"push --index {self.ld_index} --remote {dest} "
-                   f"--local {shlex.quote(str(video_path))}")
-            self.run_console(cmd, 2)
-            if self._file_size(dest) == want:
+            try:
+                r = subprocess.run([self.adb, "-s", self.device, "push",
+                                    str(video_path), dest],
+                                   capture_output=True, text=True, timeout=180)
+                if r.returncode != 0:
+                    print(f"  adb push notice: "
+                          f"{(r.stdout.strip() or r.stderr.strip()) or 'nothing'}")
+            except Exception as e:
+                print(f"  adb push error: {e}")
+            if self._wait_file_size(dest, want, timeout=10):
                 ok = True
                 break
-            print(f"  push attempt {attempt}/3 did not verify; retrying...")
+            print(f"  import attempt {attempt}/3 did not verify; retrying...")
             time.sleep(2)
         if not ok:
-            print("  Falling back to adb push...")
-            try:
-                subprocess.run([self.adb, "-s", self.device, "push",
-                                str(video_path), dest],
-                               capture_output=True, timeout=180)
-            except Exception:
-                pass
-            ok = self._file_size(dest) == want
+            print("  Trying ldconsole push fallback...")
+            self.run_console(
+                f"push --index {self.ld_index} --remote {dest} "
+                f"--local {shlex.quote(str(video_path))}", 2)
+            ok = self._wait_file_size(dest, want, timeout=10)
         size = self._file_size(dest)
         if ok:
             print(f"  1.mp4 verified on device ({size} bytes)")
