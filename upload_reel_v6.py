@@ -446,20 +446,19 @@ class LDController:
 
     def screenshot(self, name="shot"):
         ts = datetime.now().strftime("%H%M%S_%f")[:-3]
+        remote = "/sdcard/_up_" + ts + ".png"
         subprocess.run([self.adb, "-s", self.device, "shell",
-                        "screencap -p /sdcard/_up_{ts}.png"],  # noqa: F541
+                        "screencap", "-p", remote],
                        capture_output=True, timeout=30)
-        for fname in (f"_up_{ts}.png", "shot.png"):
-            p = self.dir / f"{name}_{ts}.png"
-            try:
-                subprocess.run([self.adb, "-s", self.device, "pull",
-                                f"/sdcard/{fname}", str(p)],
-                               capture_output=True, timeout=30)
-                if p.exists() and p.stat().st_size > 0:
-                    self.shell_raw(f"rm -f /sdcard/{fname}", 0.1)
-                    return p
-            except Exception:
-                continue
+        p = self.dir / f"{name}_{ts}.png"
+        try:
+            subprocess.run([self.adb, "-s", self.device, "pull",
+                            remote, str(p)], capture_output=True, timeout=30)
+        except Exception:
+            pass
+        if p.exists() and p.stat().st_size > 0:
+            self.shell_raw(f"rm -f {remote}", 0.1)
+            return p
         return None
 
 
