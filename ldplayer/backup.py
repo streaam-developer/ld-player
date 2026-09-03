@@ -6,14 +6,19 @@ Verified against LDPlayer v9.5.31.0 command set:
            ``ldconsole restore --index N --file X.ldbk``
   * app  - ``ldconsole backupapp --packagename PKG --file X.ldbk``
            ``ldconsole restoreapp --packagename PKG --file X.ldbk``
+  * tarball - raw ``.tar.gz`` filesystem snapshot (third-party / manual backups)
+              extracted and pushed to ``/data/data/<pkg>`` via adb
 
-Both are native LDPlayer formats (`.ldbk`). App restores via adb `.ab` are
-kept as a fallback for third-party restores.
+Both LDPlayer native formats (``.ldbk``) and adb ``.ab`` are supported.
+Tarball restores are a convenience path for raw app-data archives.
 """
 
 from __future__ import annotations
 
+import shutil
+import tarfile
 import time
+import tempfile
 
 from pathlib import Path
 
@@ -137,3 +142,144 @@ def backup_instance_now(cfg: dict | None = None, name: str | None = None,
     console, _ = _session(cfg)
     name = name or cfg.get("default_instance", "leidian0")
     return full_export(console, name, dest_dir)
+
+
+# ===========================================================================
+# Tarball (raw .tar.gz) restore
+# ===========================================================================
+
+def _detect_package_from_tarball(tarball: Path) -> str:
+    """Peek inside the tarball and extract the Android package name.
+
+    Expects the common layout ``data/data/<package>/...``.
+    """
+    try:
+        with tarfile.open(tarball, "r:gz") as tf:
+            for member in tf.getmembers():
+                parts = member.name.replace("\\", "/").split("/")
+                if len(parts) >= 3 and parts[0] in (".", "data") and parts[1] == "data":
+                    pkg = parts[2]
+                    if "." in pkg and not pkg.startswith("."):
+                        return pkg
+    except (tarfile.TarError, OSError) as exc:
+        raise BackupError(f"cannot read tarball {tarball.name}: {exc}")
+    raise BackupError(
+        f"could not detect package name from {tarball.name} — "
+        f"expected a data/data/<package>/... layout")
+
+
+def _get_app_uid(adb: Adb, index: int, package: str) -> str:
+    """Return the UID assigned to *package* on the device (e.g. ``u0_a137``)."""
+    out = adb.shell(index, ["dumpsys", "package", package],
+                    timeout=30, discover=True)
+    for line in out.splitlines():
+        line = line.strip()
+        if line.startswith("userId="):
+            # userId=10137  ->  uid string "u0_a137"
+            try:
+                uid_num = int(line.split("=", 1)[1].split()[0])
+                app_id = uid_num % 100000
+                user_id = uid_num // 100000
+                return f"u{user_id}_a{app_id}"
+            except (ValueError, IndexError):
+                pass
+    return "u0_a1000"  # fallback — unlikely to be correct but won't crash
+
+
+def tarball_restore(console: LdConsole, adb: Adb,
+                    instance: Instance, tarball: str | Path,
+                    force: bool = False) -> None:
+    """Restore a raw ``.tar.gz`` app-data snapshot into *instance*.
+
+    The tarball must have a ``data/data/<package>/...`` layout.  The
+    steps are:
+
+      1. Extract to a temp directory.
+      2. Detect the package name.
+      3. Force-stop the app (if running).
+      4. Remove the old ``/data/data/<pkg>`` directory.
+      5. Push the new files.
+      6. Fix ownership (``chown``) to the app's UID.
+      7. Force-start the app so it re-reads the data.
+    """
+    inst = instance.resolve()
+    tarball = Path(tarball)
+    if not tarball.is_file():
+        raise BackupError(f"tarball not found: {tarball}")
+
+    # --- extract to temp dir ------------------------------------------------
+    tmpdir = Path(tempfile.mkdtemp(prefix="ldcli_tarball_"))
+    try:
+        print(f"[{inst.name}] extracting {tarball.name} ...", flush=True)
+        with tarfile.open(tarball, "r:gz") as tf:
+            # guard against path traversal
+            for member in tf.getmembers():
+                dest = (tmpdir / member.name).resolve()
+                if not str(dest).startswith(str(tmpdir.resolve())):
+                    raise BackupError(
+                        f"refusing to extract {member.name} — "
+                        f"path traversal detected")
+            tf.extractall(tmpdir)
+
+        # --- detect package --------------------------------------------------
+        pkg = _detect_package_from_tarball(tmpdir)
+        print(f"[{inst.name}] detected package: {pkg}", flush=True)
+
+        # verify the package is installed
+        if not adb.package_installed(inst.index, pkg, discover=True):
+            raise BackupError(
+                f"package {pkg} is not installed on instance '{inst.name}' — "
+                f"install the matching APK first")
+
+        # --- locate the source data ------------------------------------------
+        # try ./data/data/<pkg> first, then data/data/<pkg>
+        data_root = None
+        for candidate in (tmpdir / "data" / "data" / pkg,
+                          tmpdir / pkg):
+            if candidate.is_dir():
+                data_root = candidate
+                break
+        if data_root is None:
+            # fallback: search for the package dir anywhere
+            for d in tmpdir.rglob(pkg):
+                if d.is_dir() and d.parent.name in ("data", pkg):
+                    data_root = d
+                    break
+        if data_root is None:
+            raise BackupError(
+                f"extracted tarball does not contain a "
+                f"data/data/{pkg}/ directory")
+
+        # --- force-stop the app ----------------------------------------------
+        remote_data = f"/data/data/{pkg}"
+        print(f"[{inst.name}] stopping {pkg} ...", flush=True)
+        adb.shell(inst.index, ["am", "force-stop", pkg],
+                  timeout=15, discover=True)
+
+        # --- remove old data & push new data ---------------------------------
+        print(f"[{inst.name}] clearing old data at {remote_data} ...",
+              flush=True)
+        adb.shell(inst.index, ["rm", "-rf", remote_data],
+                  timeout=60, discover=True)
+        adb.shell(inst.index, ["mkdir", "-p", remote_data],
+                  timeout=15, discover=True)
+
+        print(f"[{inst.name}] pushing data to {remote_data} ...", flush=True)
+        adb.push(inst.index, str(data_root), remote_data,
+                 discover=True, timeout=600)
+
+        # --- fix ownership ---------------------------------------------------
+        uid = _get_app_uid(adb, inst.index, pkg)
+        print(f"[{inst.name}] chown {uid}:{uid} on {remote_data} ...",
+              flush=True)
+        adb.shell(inst.index, ["chown", "-R", f"{uid}:{uid}", remote_data],
+                  timeout=60, discover=True)
+
+        print(f"[{inst.name}] restore complete — starting {pkg} ...",
+              flush=True)
+        adb.shell(inst.index, ["monkey", "-p", pkg, "-c",
+                               "android.intent.category.LAUNCHER", "1"],
+                  timeout=15, discover=True)
+
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)

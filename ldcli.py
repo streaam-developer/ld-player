@@ -214,7 +214,7 @@ def cmd_restore(args):
     console, adb, _ = _session(args)
     if args.kind == "full":
         name, index = _pick(args, console)
-        if not name and index is None:
+        if name is None and index is None:
             name = cfg_default_name()
         backup_mod.full_restore(console, name=name, backup_file=args.file,
                                 index=index)
@@ -222,6 +222,10 @@ def cmd_restore(args):
         inst = _instance(args, console, adb)
         backup_mod.app_restore(console, adb, inst, args.package, args.file,
                                apk=args.apk)
+    elif args.kind == "tarball":
+        inst = _instance(args, console, adb)
+        backup_mod.tarball_restore(console, adb, inst, args.file,
+                                   force=args.force)
     else:
         die(f"unknown restore kind: {args.kind}")
 
@@ -611,12 +615,14 @@ def build_parser() -> argparse.ArgumentParser:
                    help="force adb backup instead of LDPlayer backup")
     s.set_defaults(func=cmd_backup)
 
-    s = sub.add_parser("restore", help="restore a full or app backup")
-    s.add_argument("kind", choices=["full", "app"])
+    s = sub.add_parser("restore", help="restore a full, app, or tarball backup")
+    s.add_argument("kind", choices=["full", "app", "tarball"])
     inst_args(s)
     s.add_argument("file")
     s.add_argument("--package", help="package name (app restore)")
     s.add_argument("--apk", help="APK to (re)install before app-data restore")
+    s.add_argument("--force", action="store_true",
+                   help="skip confirmation prompts (tarball restore)")
     s.set_defaults(func=cmd_restore)
 
     # roll

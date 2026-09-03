@@ -82,6 +82,9 @@ ldcli roll --old-name LDPlayer --new-name fresh --apk C:\apps\myapp.apk
 | `backup app [target] --package PKG [--dest DIR] [--adb-mode]` | per-app backup (LDPlayer `backupapp`, adb `.ab` fallback) |
 | `restore full [target] FILE` | restore a snapshot **into an existing instance** |
 | `restore app [target] --package PKG FILE [--apk APK]` | restore an app backup (`restoreapp` / adb restore) |
+| `restore tarball [target] FILE` | restore a raw `.tar.gz` filesystem snapshot (e.g. manual Facebook account backups) |
+
+> **Tarball restore** accepts `.tar.gz` archives with a `data/data/<package>/...` layout. It extracts the archive, force-stops the app, pushes the data, fixes ownership (`chown`), and restarts the app. The instance must be **rooted** (`ldcli configure --index 0 --root`) and the target app must already be installed.
 
 > Full backups use LDPlayer's native `backup`/`restore` and are safe to run
 > while the emulator is running. Snapshots land in `backups\` (gitignored).
